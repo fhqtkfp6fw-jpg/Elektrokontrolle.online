@@ -1045,8 +1045,8 @@ function pvPdf(a, gruppen, abgehakt) {
     W.label(X1, yy, 'Projekt'); W.wert(X1 + 50, yy, pv.projekt || a.name);
     yy += ZL;
     W.label(X1, yy, 'Nennleistung des Systems (bei STC)');
-    W.wert(X1 + 190, yy, pv.kwdc || ''); W.label(X1 + 230, yy, 'kW DC');
-    W.wert(X1 + 300, yy, pv.kvaac || ''); W.label(X1 + 335, yy, 'kVA AC');
+    W.wert(X1 + 190, yy, pvLeistungDc(pv)); W.label(X1 + 230, yy, 'kW DC');
+    W.wert(X1 + 300, yy, pvLeistungAc(pv)); W.label(X1 + 335, yy, 'kVA AC');
     yy += ZL;
     W.label(X1, yy, 'Anlagenbeschrieb');
     let xs = X1 + 90;
@@ -1094,10 +1094,14 @@ function pvPdf(a, gruppen, abgehakt) {
   // Bausteine, die mit dem MPP übereinstimmen, werden dort wiederverwendet
   const gemeinsam = mppBloecke(W, doc, { L, R, X1, X2, MID, ZH, ZL }, a, abgehakt, eig, f, bew, wirInstallateur, SICHT_PV);
 
+  // Reihenfolge (User-Vorgabe): Seite 1 bis zur Sichtprüfung des Systems,
+  // ab Seite 2 die Angaben zur Anlage, danach Messungen DC und AC.
   const bloecke = [gemeinsam.parteien, gemeinsam.ort, gemeinsam.anlage, gemeinsam.pruefgrund,
-                   gemeinsam.ergebnis, gemeinsam.unterschriften,
-                   blockSystem, blockModule, blockWr, blockStraenge,
+                   gemeinsam.ergebnis,
                    gemeinsam.liste('Sichtprüfung des Systems (Ziffer 5.2)'),
+                   gemeinsam.unterschriften,
+                   'neueSeite',
+                   blockSystem, blockModule, blockWr, blockStraenge,
                    gemeinsam.geraete, blockStrangmessung];
 
   let seiten = 1;
@@ -1113,23 +1117,111 @@ function pvPdf(a, gruppen, abgehakt) {
   let y = kopf(1);
   W.trenner(y);
   const oben = 25.5;
+  const seitenwechsel = () => {
+    W.line(L, oben, L, y); W.line(R, oben, R, y);
+    doc.addPage(); seiten++;
+    y = kopf(seiten); W.trenner(y);
+  };
   bloecke.forEach(fn => {
+    if (fn === 'neueSeite') return seitenwechsel();
     W.trocken = true;
     const hoehe = fn(y) - y;
     W.trocken = false;
-    if (y + hoehe > UNTEN) {
-      W.line(L, oben, L, y); W.line(R, oben, R, y);
-      doc.addPage(); seiten++;
-      y = kopf(seiten); W.trenner(y);
-    }
+    if (y + hoehe > UNTEN) seitenwechsel();
     y = fn(y);
     W.trenner(y);
   });
+
+  // AC-Messungen im Hochformat direkt unter die Strangmessungen
+  y = messtabelleHoch(W, doc, { L, R, X1, UNTEN }, gruppen, y,
+    standY => { y = standY; seitenwechsel(); return y; });
   W.line(L, oben, L, y); W.line(R, oben, R, y);
 
-  messtabelleQuer(doc, k, a, f, gruppen, wirInstallateur, () => ++seiten);
   seitenzahlen(doc, seiten, 'M+P PV 2020');
   return doc;
+}
+
+/* AC-Messungen im Hochformat (PV-Protokoll). Schmale Spalten, die Bezeichnung
+   bricht auf zwei Zeilen um – so passt eine kleine Anlage auf zwei Seiten. */
+function messtabelleHoch(W, doc, M, gruppen, yStart, neueSeite) {
+  const { L, R, X1, UNTEN } = M;
+  if (!gruppen.length) return yStart;
+
+  const SP = [[22, 'Strom-\nkreis', 'Nr.', 'nr'], [80, 'Ort / Anlageteil', 'Bezeichnung', 'bez'],
+              [28, 'Leitung / Kabel', 'Art\nTyp', 'art'], [36, '', 'Leiter/\nQuer.[mm²]', 'leiter'],
+              [32, 'Überstromschutz', 'Art\nCharakt.', 'charakt'], [24, '', 'IN\n[A]', 'in_a'],
+              [30, 'Messungen (gemessener Wert)', 'IK Anf.\n[A]', 'ik_anf_pe'], [30, '', 'IK Ende\n[A]', 'ik_end_pe'],
+              [30, '', 'IK Anf.\n[A]', 'ik_anf_n'], [30, '', 'IK Ende\n[A]', 'ik_end_n'],
+              [32, '', 'RISO\n[MOhm]', 'riso'], [32, '', 'Leitf.\nSchutzl.', 'rlo'],
+              [26, 'RCD', 'IN/Typ\n[A]', 'rcd_in'], [24, '', 'IdN\n[mA]', 'idn'],
+              [32, '', 'Ausl.\n[ms/ok]', 'ausl'], [0, 'Weiteres', 'Drehfeld', 'weiteres']];
+  const GG = [0, 1, 2, 4, 6, 12, 15];
+  const xs = [L];
+  SP.slice(0, -1).forEach(([b]) => xs.push(xs[xs.length - 1] + b));
+  xs.push(R);
+
+  const kopfZeichnen = y => {
+    W.titel(X1, y + 10, 'Messungen AC-Anschluss', 8.5);
+    let yy = y + 14;
+    W.line(L, yy, R, yy);
+    SP.forEach(([, gruppe], i) => {
+      if (!gruppe) return;
+      const naechste = GG.find(g => g > i);
+      const breite = (naechste !== undefined ? xs[naechste] : R) - xs[i] - 3;
+      W.umbruch(gruppe, breite, 5.2, true).forEach((z, j) => W.txt(xs[i] + 2, yy + 7 + j * 5.8, z, 5.2, true));
+    });
+    const spaltenOben = yy + 19;
+    GG.forEach(i => W.line(xs[i], yy, xs[i], spaltenOben));
+    W.line(R, yy, R, spaltenOben);
+    W.line(L, spaltenOben, R, spaltenOben);
+    SP.forEach(([, , kopf2], i) => String(kopf2).split('\n')
+      .forEach((z, j) => W.txt(xs[i] + 2, spaltenOben + 6.5 + j * 5.8, z, 5, false, true)));
+    const kopfUnten = spaltenOben + 15;
+    W.line(L, kopfUnten, R, kopfUnten);
+    return { kopfUnten, spaltenOben };
+  };
+
+  let { kopfUnten, spaltenOben } = kopfZeichnen(yStart);
+  let y = kopfUnten;
+  const abschliessen = () => { xs.forEach(x => W.line(x, spaltenOben, x, y)); W.line(R, spaltenOben, R, y); };
+
+  // Die Bezeichnung darf über drei Zeilen laufen; wird sie länger, schrumpft
+  // die Schrift, damit nichts verloren geht.
+  const bezZerlegen = text => {
+    for (const size of [6, 5.6, 5.2, 4.8]) {
+      const zeilen = W.umbruch(text || '', SP[1][0] - 4, size, true);
+      if (zeilen.length <= 3) return { zeilen, size };
+    }
+    return { zeilen: W.umbruch(text || '', SP[1][0] - 4, 4.8, true).slice(0, 3), size: 4.8 };
+  };
+
+  gruppen.forEach(g => {
+    const { zeilen: bezZeilen, size: bezSize } = bezZerlegen(g.bez);
+    const hoehe = Math.max(13, bezZeilen.length * (bezSize + 1.3) + 5);
+    if (y + hoehe > UNTEN) {
+      abschliessen();
+      y = neueSeite(y);
+      const neu = kopfZeichnen(y);
+      kopfUnten = neu.kopfUnten; spaltenOben = neu.spaltenOben;
+      y = kopfUnten;
+    }
+    SP.forEach(([, , , feld], i) => {
+      if (feld === 'bez') {
+        bezZeilen.forEach((z, j) => W.txt(xs[1] + 2, y + 8 + j * (bezSize + 1.3), z, bezSize, true));
+        return;
+      }
+      const v = g[feld];
+      if (!v) return;
+      let size = 6.2;
+      const platz = xs[i + 1] - xs[i] - 3;
+      while (W.breite(v, size, true) > platz && size > 4.4) size -= 0.3;
+      W.txt(xs[i] + 2, y + 8, v, size, true);
+    });
+    y += hoehe;
+    W.line(L, y, R, y, 0.25);
+  });
+  abschliessen();
+  return y;
 }
 
 /* Gemeinsame Bausteine für MPP und PV-Protokoll. Jede Funktion zeichnet ab y
@@ -1199,33 +1291,64 @@ function mppBloecke(W, doc, M, a, abgehakt, eig, f, bew, wirInstallateur, sichtL
     yy += ZH;
     W.label(X1, yy, 'Zähler-Nr.'); W.wert(X1 + 66, yy, a.zaehler_nr);
     W.label(X2, yy, 'Inst.-Anzeige Nr./ Jahr');
-    const KA0 = k.kontrollart || {};
+    const KA0 = anlKontrollart(a);
     W.wert(X2 + 92, yy, KA0.anzeige_nr || ''); W.txt(X2 + 140, yy, KA0.anzeige_nr ? '/' : '');
     W.wert(X2 + 148, yy, KA0.anzeige_jahr || '');
     return yy + 6;
   };
 
+  // Prüfgrund/Kontrollart: die Auswahl aus dem Reiter Kunde. Alte Einzel-Flags
+  // werden weiter berücksichtigt, damit früher erfasste Kontrollen stimmen.
+  const P = anlPruefgrund(a), KA = anlKontrollart(a);
+  const ALT_GRUND = { 'Neuanlage': 'neuanlage', 'Bestehende Anlage': 'bestehend',
+                      'Änderung': 'aenderung', 'Erweiterung': 'erweiterung' };
+  const ALT_ART = { 'Schlusskontrolle (NIV Art. 14)': 'sk', 'Schlusskontrolle (NIV Art. 7/9)': 'sk79',
+                    'Abnahmekontrolle (AK)': 'ak', 'Periodische Kontrolle (PK)': 'pk' };
+  const grundAn = name => P.wahl === name || !!P[ALT_GRUND[name]];
+  const artAn = name => KA.wahl === name || !!KA[ALT_ART[name]];
+  const kontrollDatum = KA.datum || KA.datum_sk || KA.datum_akpk || '';
+
   const pruefgrund = y => {
-    const P = k.pruefgrund || {}, KA = k.kontrollart || {}, CK = X1 + 118;
+    const CK = X1 + 118;
     W.titel(X1, y + 12, 'Prüfgrund');
     W.titel(CK, y + 12, 'Durchgeführte Kontrolle');
     W.titel(X2, y + 12, 'Kontrollumfang / ausgeführte Installation');
     let yy = y + 12 + ZH + 1;
     const oben = yy;
-    W.haken(X1, yy, 'Neuanlage', P.neuanlage); W.haken(CK, yy, 'Schlusskontrolle (NIV Art. 14)', KA.sk);
-    yy += ZH;
-    W.haken(X1, yy, 'Bestehende Anlage', P.bestehend); W.haken(CK, yy, 'Schlusskontrolle (NIV Art. 7/9)', KA.sk79);
-    yy += ZH;
-    W.haken(X1 + 12, yy, 'Änderung', P.aenderung); W.haken(CK, yy, 'Abnahmekontrolle (AK)', KA.ak);
-    yy += ZH;
-    W.haken(X1 + 12, yy, 'Erweiterung', P.erweiterung); W.haken(CK, yy, 'Periodische Kontrolle (PK)', KA.pk);
-    yy += ZH;
-    W.kasten(X1, yy - 5.6, !!P.freitext); W.txt(X1 + 10, yy, P.freitext || '', 7.5);
-    yy += ZH;
-    W.label(X1, yy, 'Datum der Kontrolle SK'); W.wert(X1 + 108, yy, KA.datum_sk || '');
-    W.label(X2, yy, 'Datum der Kontrolle AK/PK'); W.wert(X2 + 150, yy, KA.datum_akpk || '');
+
+    if (k.pv) {
+      // Platzsparend: nur was zutrifft. Ist nichts gewählt, bleibt die Zeile leer.
+      const grund = PRUEFGRUENDE.find(grundAn);
+      const art = KONTROLLARTEN.find(artAn);
+      if (grund) W.haken(X1, yy, grund, true);
+      if (art) W.haken(CK, yy, art, true);
+      yy += ZH;
+      if (P.freitext) { W.kasten(X1, yy - 5.6, true); W.txt(X1 + 10, yy, P.freitext, 7.5); yy += ZH; }
+      if (kontrollDatum) {
+        W.label(X1, yy, 'Datum der Kontrolle'); W.wert(X1 + 96, yy, kontrollDatum);
+        yy += ZH;
+      }
+    } else {
+      W.haken(X1, yy, 'Neuanlage', grundAn('Neuanlage'));
+      W.haken(CK, yy, 'Schlusskontrolle (NIV Art. 14)', artAn('Schlusskontrolle (NIV Art. 14)'));
+      yy += ZH;
+      W.haken(X1, yy, 'Bestehende Anlage', grundAn('Bestehende Anlage'));
+      W.haken(CK, yy, 'Schlusskontrolle (NIV Art. 7/9)', artAn('Schlusskontrolle (NIV Art. 7/9)'));
+      yy += ZH;
+      W.haken(X1 + 12, yy, 'Änderung', grundAn('Änderung'));
+      W.haken(CK, yy, 'Abnahmekontrolle (AK)', artAn('Abnahmekontrolle (AK)'));
+      yy += ZH;
+      W.haken(X1 + 12, yy, 'Erweiterung', grundAn('Erweiterung'));
+      W.haken(CK, yy, 'Periodische Kontrolle (PK)', artAn('Periodische Kontrolle (PK)'));
+      yy += ZH;
+      if (P.freitext) { W.kasten(X1, yy - 5.6, true); W.txt(X1 + 10, yy, P.freitext, 7.5); yy += ZH; }
+      const sk = artAn('Schlusskontrolle (NIV Art. 14)') || artAn('Schlusskontrolle (NIV Art. 7/9)');
+      W.label(X1, yy, sk ? 'Datum der Kontrolle SK' : 'Datum der Kontrolle AK/PK');
+      W.wert(X1 + 108, yy, kontrollDatum);
+      yy += ZH;
+    }
     W.umbruch(k.kontrollumfang, R - X2 - 10, 8.5, true).forEach((z, i) => {
-      if (oben + i * ZH < yy - ZH + 1) W.wert(X2, oben + i * ZH, z);
+      if (oben + i * ZH < yy) W.wert(X2, oben + i * ZH, z);
     });
     return yy + 6;
   };
@@ -1586,26 +1709,38 @@ function sinaPdf(a, gruppen) {
   y = yy + 6;
   trenner(y);
 
-  // Prüfgrund / Kontrolle / Umfang
-  const P = k.pruefgrund || {}, KA = k.kontrollart || {};
+  // Prüfgrund / Kontrolle / Umfang – beides gehört zur Anlage
+  const P = anlPruefgrund(a), KA = anlKontrollart(a);
+  const grundAn = name => P.wahl === name
+    || !!P[{ 'Neuanlage': 'neuanlage', 'Bestehende Anlage': 'bestehend',
+             'Änderung': 'aenderung', 'Erweiterung': 'erweiterung' }[name]];
+  const artAn = name => KA.wahl === name
+    || !!KA[{ 'Schlusskontrolle (NIV Art. 14)': 'sk', 'Schlusskontrolle (NIV Art. 7/9)': 'sk79',
+              'Abnahmekontrolle (AK)': 'ak', 'Periodische Kontrolle (PK)': 'pk' }[name]];
   const CK = X1 + 118;
   titel(X1, y + 12, 'Prüfgrund');
   titel(CK, y + 12, 'Durchgeführte Kontrolle');
   titel(X2, y + 12, 'Kontrollumfang / ausgeführte Installation');
   yy = y + 12 + ZH + 1;
   const umfangOben = yy;
-  haken(X1, yy, 'Neuanlage', P.neuanlage); haken(CK, yy, 'Schlusskontrolle (NIV Art. 14)', KA.sk);
+  haken(X1, yy, 'Neuanlage', grundAn('Neuanlage'));
+  haken(CK, yy, 'Schlusskontrolle (NIV Art. 14)', artAn('Schlusskontrolle (NIV Art. 14)'));
   yy += ZH;
-  haken(X1, yy, 'Bestehende Anlage', P.bestehend); haken(CK, yy, 'Schlusskontrolle (NIV Art. 7/9)', KA.sk79);
+  haken(X1, yy, 'Bestehende Anlage', grundAn('Bestehende Anlage'));
+  haken(CK, yy, 'Schlusskontrolle (NIV Art. 7/9)', artAn('Schlusskontrolle (NIV Art. 7/9)'));
   yy += ZH;
-  haken(X1 + 12, yy, 'Änderung', P.aenderung); haken(CK, yy, 'Abnahmekontrolle (AK)', KA.ak);
+  haken(X1 + 12, yy, 'Änderung', grundAn('Änderung'));
+  haken(CK, yy, 'Abnahmekontrolle (AK)', artAn('Abnahmekontrolle (AK)'));
   yy += ZH;
-  haken(X1 + 12, yy, 'Erweiterung', P.erweiterung); haken(CK, yy, 'Periodische Kontrolle (PK)', KA.pk);
+  haken(X1 + 12, yy, 'Erweiterung', grundAn('Erweiterung'));
+  haken(CK, yy, 'Periodische Kontrolle (PK)', artAn('Periodische Kontrolle (PK)'));
   yy += ZH;
   kasten(X1, yy - 5.6, !!P.freitext); txt(X1 + 10, yy, P.freitext || '', 7.5);
   yy += ZH;
-  label(X1, yy, 'Datum der Kontrolle SK'); wert(X1 + 108, yy, KA.datum_sk || '');
-  label(X2, yy, 'Datum der Kontrolle AK/PK'); wert(X2 + 150, yy, KA.datum_akpk || '');
+  const skGewaehlt = artAn('Schlusskontrolle (NIV Art. 14)') || artAn('Schlusskontrolle (NIV Art. 7/9)');
+  const datumKontrolle = KA.datum || KA.datum_sk || KA.datum_akpk || '';
+  label(X1, yy, 'Datum der Kontrolle SK'); wert(X1 + 108, yy, skGewaehlt ? datumKontrolle : '');
+  label(X2, yy, 'Datum der Kontrolle AK/PK'); wert(X2 + 150, yy, skGewaehlt ? '' : datumKontrolle);
   // Kontrollumfang mehrzeilig
   doc.setFont('helvetica', 'bold'); doc.setFontSize(8.5);
   doc.splitTextToSize(String(k.kontrollumfang || ''), R - X2 - 10).forEach((z, i) => {
@@ -2159,6 +2294,9 @@ function renderKunde() {
     </div>
     <label class="f">Kontrollumfang / ausgeführte Installation</label>
     <input type="text" id="k_umfang" value="${esc(k.kontrollumfang)}" placeholder="z.B. Vollkontrolle">
+
+    <div class="hint">Prüfgrund und durchgeführte Kontrolle werden <b>pro Anlage</b> erfasst –
+      im Reiter 🔌 Anlagen.</div>
   </div>
 
   <div class="card">
@@ -2357,6 +2495,18 @@ async function partnerBereich() {
    ============================================================ */
 
 const STATUS_STUFEN = ['Erfasst', 'Gemessen', 'Geschrieben', 'Abgerechnet', 'Abgeschlossen'];
+
+// Prüfgrund und durchgeführte Kontrolle – im Formular erscheint nur die Auswahl.
+// Beides gehört zur ANLAGE (jede Anlage kann einen eigenen Grund haben); was früher
+// an der Kontrolle erfasst wurde, gilt weiterhin als Rückfall.
+const PRUEFGRUENDE = ['Neuanlage', 'Bestehende Anlage', 'Änderung', 'Erweiterung'];
+const KONTROLLARTEN = ['Schlusskontrolle (NIV Art. 14)', 'Schlusskontrolle (NIV Art. 7/9)',
+                       'Abnahmekontrolle (AK)', 'Periodische Kontrolle (PK)'];
+
+const anlPruefgrund = a => ((a && a.sk_angaben && a.sk_angaben.pruefgrund)
+  || (S.kontrolle && S.kontrolle.pruefgrund) || {});
+const anlKontrollart = a => ((a && a.sk_angaben && a.sk_angaben.kontrollart)
+  || (S.kontrolle && S.kontrolle.kontrollart) || {});
 
 S.suche = { text: '', status: '', nur_meine: false, papierkorb: false };
 
@@ -2869,9 +3019,14 @@ async function renderAnlagen() {
     <div class="hint">Diese Angaben erscheinen im PV-Protokoll.</div>
     <div class="row">
       <div><label class="f">Projekt</label><input type="text" id="pv_projekt" value="${esc(pv.projekt || '')}" placeholder="z.B. PV Anlage Musterweg 3"></div>
-      <div class="narrow" style="flex:0 0 130px"><label class="f">Leistung [kW DC]</label><input type="text" id="pv_kwdc" inputmode="decimal" value="${esc(pv.kwdc || '')}"></div>
-      <div class="narrow" style="flex:0 0 130px"><label class="f">Leistung [kVA AC]</label><input type="text" id="pv_kvaac" inputmode="decimal" value="${esc(pv.kvaac || '')}"></div>
+      <div class="narrow" style="flex:0 0 130px"><label class="f">Leistung [kW DC]</label>
+        <input type="text" id="pv_kwdc" value="${esc(pvLeistungDc(pv))}" readonly></div>
+      <div class="narrow" style="flex:0 0 130px"><label class="f">Leistung [kVA AC]</label>
+        <input type="text" id="pv_kvaac" value="${esc(pvLeistungAc(pv))}" readonly></div>
     </div>
+    <div class="hint">Die beiden Leistungen werden aus den Tabellen unten gerechnet: <b>kW DC</b> aus
+      Pmpp × Anzahl aller Modulzeilen (geteilt durch 1000), <b>kVA AC</b> aus PAC × Anzahl der
+      Wechselrichter.</div>
     <div class="row">
       <div><label class="f">Anlagenbeschrieb</label>
         <select id="pv_beschrieb"><option value="">–</option>
@@ -2899,7 +3054,8 @@ async function renderAnlagen() {
        ['pac', 'PAC [kVA]', 80], ['anzahl', 'Anzahl', 70]])}
     ${pvTabelle('straenge', 'Stränge', pv.straenge || [],
       [['nr', 'Strang Nr.', 70], ['modultyp', 'Modultyp Nr.', 80], ['anzahl', 'Module je Strang', 90],
-       ['wr', 'auf WR Nr.', 70], ['teilarray', 'Teilarray', 80], ['querschnitt', 'Quer. [mm²]', 80]])}
+       ['wr', 'auf WR Nr.', 70], ['teilarray', 'Teilarray', 80], ['typ', 'Typ (Kabel)', 90],
+       ['querschnitt', 'Quer. [mm²]', 80]])}
     ${pvTabelle('strangmessungen', 'Strangmessungen', pv.strangmessungen || [],
       [['nr', 'Strang', 60], ['uoc', 'UOC [V]', 70], ['isc', 'ISC [A]', 70], ['riso', 'RISO [MΩ]', 80],
        ['umpp', 'Umpp [V]', 70], ['impp', 'Impp [A]', 70], ['rpa', 'RPA [Ω]', 70]])}
@@ -2925,6 +3081,32 @@ async function renderAnlagen() {
       ${wahl('a_asbest', 'asbest', ['Asbestfrei', 'Asbestverdacht'], 'Schaltgerätekombination')}
     </div>
     <div class="btnrow" style="margin-top:12px"><button class="btn danger small" id="a_del">Anlage löschen</button></div>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0">Prüfgrund und durchgeführte Kontrolle</h3>
+    <div class="hint">Gilt <b>für diese Anlage</b> – jede Anlage kann einen eigenen Grund haben.
+      Im Formular erscheint nur das Gewählte, angekreuzt und ohne die übrigen leeren Kästchen.</div>
+    <div class="row">
+      <div><label class="f">Prüfgrund</label>
+        <select id="a_pgrund"><option value="">– keiner –</option>
+          ${PRUEFGRUENDE.map(s => `<option value="${esc(s)}" ${anlPruefgrund(a).wahl === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
+        </select></div>
+      <div><label class="f">Durchgeführte Kontrolle</label>
+        <select id="a_kart"><option value="">– keine –</option>
+          ${KONTROLLARTEN.map(s => `<option value="${esc(s)}" ${anlKontrollart(a).wahl === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
+        </select></div>
+    </div>
+    <div class="row">
+      <div><label class="f">Prüfgrund – eigener Text <span class="hint" style="display:inline">(nur falls nötig)</span></label>
+        <input type="text" id="a_pgrund_txt" value="${esc(anlPruefgrund(a).freitext || '')}"></div>
+      <div class="narrow" style="flex:0 0 170px"><label class="f">Datum der Kontrolle</label>
+        <input type="date" id="a_kdatum" value="${esc(anlKontrollart(a).datum || '')}"></div>
+      <div class="narrow" style="flex:0 0 150px"><label class="f">Inst.-Anzeige Nr.</label>
+        <input type="text" id="a_anz_nr" value="${esc(anlKontrollart(a).anzeige_nr || '')}"></div>
+      <div class="narrow" style="flex:0 0 110px"><label class="f">Jahr</label>
+        <input type="text" id="a_anz_jahr" inputmode="numeric" value="${esc(anlKontrollart(a).anzeige_jahr || '')}"></div>
+    </div>
   </div>
 
   <div class="card">
@@ -2964,6 +3146,21 @@ async function renderAnlagen() {
     feldSpeichern('anlagen', a.id, 'sk_angaben', a.sk_angaben);
   });
 
+  // Prüfgrund und durchgeführte Kontrolle dieser Anlage (in sk_angaben)
+  const anlBlock = (block, schluessel, el) => {
+    const ereignis = el.tagName === 'SELECT' ? 'change' : 'input';
+    el.addEventListener(ereignis, () => {
+      const vorher = block === 'pruefgrund' ? anlPruefgrund(a) : anlKontrollart(a);
+      const neu = Object.assign({}, vorher, { [schluessel]: el.value });
+      a.sk_angaben = Object.assign({}, a.sk_angaben, { [block]: neu });
+      feldSpeichern('anlagen', a.id, 'sk_angaben', a.sk_angaben);
+    });
+  };
+  [['pruefgrund', 'wahl', 'a_pgrund'], ['pruefgrund', 'freitext', 'a_pgrund_txt'],
+   ['kontrollart', 'wahl', 'a_kart'], ['kontrollart', 'datum', 'a_kdatum'],
+   ['kontrollart', 'anzeige_nr', 'a_anz_nr'], ['kontrollart', 'anzeige_jahr', 'a_anz_jahr']]
+    .forEach(([block, schluessel, id]) => { const el = $('#' + id); if (el) anlBlock(block, schluessel, el); });
+
   $('#a_del').addEventListener('click', async () => {
     if (!confirm(`Anlage «${a.name || 'ohne Name'}» mit allen Messzeilen löschen?`)) return;
     await zeileLoeschen('anlagen', a.id);
@@ -2999,6 +3196,27 @@ async function renderAnlagen() {
 
 /* ---- PV-Angaben: kleine Tabellen mit beliebig vielen Zeilen ---- */
 
+/* Nennleistung aus den Tabellen rechnen – das Feld wird nicht mehr getippt.
+   DC: Summe(Pmpp × Anzahl) durch 1000, weil das Formular kW verlangt.
+   AC: Summe(PAC × Anzahl), die Wechselrichter sind schon in kVA angegeben. */
+function pvZahl(x) {
+  const n = parseFloat(String(x == null ? '' : x).replace(',', '.').replace(/[^\d.-]/g, ''));
+  return isFinite(n) ? n : 0;
+}
+
+function pvSumme(zeilen, wertFeld, teiler) {
+  const s = (zeilen || []).reduce((summe, z) => {
+    const anzahl = pvZahl(z.anzahl) || (pvZahl(z[wertFeld]) ? 1 : 0);   // ohne Anzahl: einmal zählen
+    return summe + pvZahl(z[wertFeld]) * anzahl;
+  }, 0);
+  if (!s) return '';
+  const wert = s / (teiler || 1);
+  return (Math.round(wert * 100) / 100).toString().replace('.', '.');
+}
+
+const pvLeistungDc = pv => pvSumme(pv.module, 'pmpp', 1000);
+const pvLeistungAc = pv => pvSumme(pv.wr, 'pac', 1);
+
 function pvTabelle(schluessel, titel, zeilen, spalten) {
   return `<label class="f" style="margin-top:14px">${esc(titel)}</label>
     <div class="pvtab" data-pv="${schluessel}">
@@ -3017,11 +3235,18 @@ function pvTabelle(schluessel, titel, zeilen, spalten) {
 
 function pvVerdrahten(a) {
   const holen = () => (a.sk_angaben || {}).pv || {};
+  // Die gerechneten Leistungen sofort nachziehen, ohne die Ansicht neu zu zeichnen
+  const leistungenZeigen = () => {
+    const pv = holen();
+    const dc = $('#pv_kwdc'), ac = $('#pv_kvaac');
+    if (dc) dc.value = pvLeistungDc(pv);
+    if (ac) ac.value = pvLeistungAc(pv);
+  };
   const setzen = neu => {
     a.sk_angaben = Object.assign({}, a.sk_angaben, { pv: Object.assign({}, holen(), neu) });
     feldSpeichern('anlagen', a.id, 'sk_angaben', a.sk_angaben);
   };
-  const einfach = { pv_projekt: 'projekt', pv_kwdc: 'kwdc', pv_kvaac: 'kvaac', pv_beschrieb: 'beschrieb',
+  const einfach = { pv_projekt: 'projekt', pv_beschrieb: 'beschrieb',
                     pv_typ: 'typ', pv_ausrichtung: 'ausrichtung', pv_neigung: 'neigung', pv_kurz: 'kurz',
                     pv_inbetrieb: 'inbetriebnahme', pv_von: 'montage_von', pv_bis: 'montage_bis' };
   Object.entries(einfach).forEach(([id, feld]) => {
@@ -3039,6 +3264,7 @@ function pvVerdrahten(a) {
         const liste = (holen()[schluessel] || []).slice();
         liste[i] = Object.assign({}, liste[i], { [inp.dataset.feld]: inp.value });
         setzen({ [schluessel]: liste });
+        leistungenZeigen();
       }));
       tr.querySelector('.pvdel').addEventListener('click', () => {
         const liste = (holen()[schluessel] || []).slice();
@@ -3956,7 +4182,7 @@ async function optGrund() {
       <button class="btn primary" id="g_save">Speichern</button>
       <button class="btn danger small" id="g_reset">Auf Standard zurücksetzen</button>
     </div>
-    <div class="hint" style="margin-top:12px">App-Version: <b>Online 0.9</b></div>
+    <div class="hint" style="margin-top:12px">App-Version: <b>Online 1.1</b></div>
   </div>`;
 
   // Ändern darf nur der Admin (die Datenbank lässt es ohnehin nur ihm zu)
