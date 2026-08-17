@@ -39,10 +39,22 @@ const S = {
 const istSuperadmin = () => S.profil && S.profil.rolle === 'superadmin';
 const istAdmin = () => S.profil && (S.profil.rolle === 'admin' || S.profil.rolle === 'superadmin');
 
+// Datum immer als TT.MM.JJJJ – egal ob ISO aus einem Datumsfeld oder Zeitstempel
+function dat(wert) {
+  if (!wert) return '';
+  const t = String(wert).trim();
+  const iso = t.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) return iso[3] + '.' + iso[2] + '.' + iso[1];
+  const d = new Date(wert);
+  if (isNaN(d)) return t;
+  const zwei = n => String(n).padStart(2, '0');
+  return zwei(d.getDate()) + '.' + zwei(d.getMonth() + 1) + '.' + d.getFullYear();
+}
+
 function fmtDate(ts) {
   if (!ts) return '';
   const d = new Date(ts);
-  return d.toLocaleDateString('de-CH') + ' ' + d.toLocaleTimeString('de-CH', { hour: '2-digit', minute: '2-digit' });
+  return dat(d) + ' ' + d.toLocaleTimeString('de-CH', { hour: '2-digit', minute: '2-digit' });
 }
 
 /* ---------------- Rückmeldungen ---------------- */
@@ -378,7 +390,7 @@ async function renderAbschluss() {
       </div>
       ${(S.arbeitszeit || []).length ? `<div class="hint" style="margin-top:12px">
         ${S.arbeitszeit.map(z => `<div class="verlaufzeile" data-azid="${z.id}">
-            <b>${Number(z.stunden || 0).toFixed(2)} h</b> – ${esc(new Date(z.datum).toLocaleDateString('de-CH'))}
+            <b>${Number(z.stunden || 0).toFixed(2)} h</b> – ${esc(dat(z.datum))}
             ${z.kuerzel ? ' · ' + esc(z.kuerzel) : ''}${z.taetigkeit ? ' · ' + esc(z.taetigkeit) : ''}
             <button class="iconbtn az_del" title="Eintrag löschen">🗑</button>
           </div>`).join('')}
@@ -762,7 +774,7 @@ async function berichtPdf(wahl) {
   const vomTyp = t => S.maengel.filter(m => (m.typ || 'mangel') === t && dabei(m));
   const maengel = vomTyp('mangel'), infos = vomTyp('info'), notizen = intern ? vomTyp('notiz') : [];
 
-  const heute = new Date().toLocaleDateString('de-CH');
+  const heute = dat(new Date());
   // Wer hat kontrolliert: die im Abschluss angehakten Mitarbeiter. Ist niemand
   // angehakt, gelten die Unterzeichnenden, sonst die angemeldete Person.
   const team = await teamLaden();
@@ -1027,11 +1039,30 @@ function pvPdf(a, gruppen, abgehakt) {
     W.line(L, kopfUnten, R, kopfUnten);
     yy = kopfUnten;
     zeilen.forEach(zeile => {
-      spalten.forEach(([, , schluessel], i) => {
+      // Lange Werte werden umgebrochen; die Zeile wird dadurch höher und die
+      // übrigen Angaben stehen darin mittig.
+      const ZEILE = 8.6;
+      const teile = spalten.map(([, , schluessel], i) => {
         const v = zeile[schluessel];
-        if (v) W.wert(xs[i] + 4, yy + 9, v, 7.5);
+        if (!v) return { zeilen: [], size: 7.5 };
+        const platz = xs[i + 1] - xs[i] - 6;
+        let size = 7.5;
+        let umbrochen = W.umbruch(v, platz, size, true);
+        // Ein einzelnes zu langes Wort lässt sich nicht umbrechen – dann kleiner setzen
+        while (umbrochen.some(z => W.breite(z, size, true) > platz) && size > 4.8) {
+          size -= 0.25;
+          umbrochen = W.umbruch(v, platz, size, true);
+        }
+        return { zeilen: umbrochen, size };
       });
-      yy += 13;
+      const hoch = Math.max(1, ...teile.map(t => t.zeilen.length));
+      const hoehe = Math.max(13, hoch * ZEILE + 4);
+      teile.forEach((t, i) => {
+        if (!t.zeilen.length) return;
+        const oben = yy + (hoehe - t.zeilen.length * ZEILE) / 2 + ZEILE - 2;
+        t.zeilen.forEach((z, j) => W.wert(xs[i] + 4, oben + j * ZEILE, z, t.size));
+      });
+      yy += hoehe;
       W.line(L, yy, R, yy, 0.25);
     });
     xs.forEach(x => W.line(x, y + (titel ? 14 : 0), x, yy));
@@ -1061,9 +1092,9 @@ function pvPdf(a, gruppen, abgehakt) {
     yy += ZL;
     W.label(X1, yy, 'Kurzbeschrieb'); W.wert(X1 + 70, yy, pv.kurz || '');
     yy += ZL;
-    W.label(X1, yy, 'Datum Inbetriebnahme'); W.wert(X1 + 110, yy, pv.inbetriebnahme || '');
-    W.label(X1 + 200, yy, 'Montagezeitraum von'); W.wert(X1 + 310, yy, pv.montage_von || '');
-    W.label(X1 + 380, yy, 'bis'); W.wert(X1 + 398, yy, pv.montage_bis || '');
+    W.label(X1, yy, 'Datum Inbetriebnahme'); W.wert(X1 + 110, yy, dat(pv.inbetriebnahme));
+    W.label(X1 + 200, yy, 'Montagezeitraum von'); W.wert(X1 + 310, yy, dat(pv.montage_von));
+    W.label(X1 + 380, yy, 'bis'); W.wert(X1 + 398, yy, dat(pv.montage_bis));
     return yy + 6;
   };
 
@@ -1074,9 +1105,40 @@ function pvPdf(a, gruppen, abgehakt) {
     [0, 'Anzahl\n[St.]', 'anzahl']], pv.module || [], 'Angaben PV-Module') + 4;
 
   const blockWr = y => tabelle(y, [
-    [40, 'Typ Nr.', 'typ'], [110, 'Hersteller', 'hersteller'], [110, 'Modell', 'modell'],
-    [110, '(freies Feld)', 'frei'], [48, 'PAC\n[kVA]', 'pac'], [44, 'Galv.\nTrenn.', 'galv'],
-    [0, 'Anzahl\n[St.]', 'anzahl']], pv.wr || [], 'Angaben Wechselrichter / Leistungsoptimierer') + 4;
+    [32, 'Typ Nr.', 'typ'], [86, 'Hersteller', 'hersteller'], [100, 'Modell', 'modell'],
+    [100, 'Seriennummer', 'seriennr'], [66, 'Gridcode', 'gridcode'], [42, 'PAC\n[kVA]', 'pac'],
+    [38, 'Galv.\nTrenn.', 'galv'], [0, 'Anzahl\n[St.]', 'anzahl']],
+    // «frei» war der frühere Name der Spalte – alte Einträge bleiben sichtbar
+    (pv.wr || []).map(z => Object.assign({}, z, { seriennr: z.seriennr || z.frei || '' })),
+    'Angaben Wechselrichter / Leistungsoptimierer') + 4;
+
+  /* Stationäre elektrische Speichersysteme – Kästchen, gerechnete Kapazität,
+     Inbetriebnahme und die Batterien. Die Tabelle erscheint nur, wenn welche
+     erfasst sind. */
+  const blockSpeicher = y => {
+    const sp = pv.speicher || {};
+    W.titel(X1, y + 11, 'Stationäre elektrische Speichersysteme', 8.5);
+    let yy = y + 11 + ZL + 2;
+    let xs = X1;
+    [['keine', 'Keine'], ['ac', 'AC gekoppelt'], ['dc', 'DC gekoppelt']]
+      .forEach(([wert, text]) => { xs += W.haken(xs, yy, text, sp.kopplung === wert) + 14; });
+    const kwh = pvSpeicherKwh(pv);
+    if (kwh) {
+      W.label(X2 + 60, yy, 'Speicherkapazität total');
+      W.wert(X2 + 172, yy, kwh); W.label(X2 + 214, yy, 'kWh');
+    }
+    yy += ZL;
+    if (sp.inbetriebnahme) {
+      W.label(X1, yy, 'Datum Inbetriebnahme Speichersystem');
+      W.wert(X1 + 190, yy, dat(sp.inbetriebnahme));
+      yy += ZL;
+    }
+    if (!(pv.batterien || []).length) return yy + 4;
+    return tabelle(yy - 8, [
+      [180, 'Hersteller', 'hersteller'], [180, 'Modell', 'modell'],
+      [110, 'Speicherkapazität [kWh]', 'kapazitaet'], [0, 'Anzahl\n[St.]', 'anzahl']],
+      pv.batterien) + 4;
+  };
 
   const blockStraenge = y => tabelle(y, [
     [56, 'Strang Nr.', 'nr'], [90, 'Modultyp Nr.', 'modultyp'], [100, 'Anz. Module je Strang', 'anzahl'],
@@ -1084,12 +1146,37 @@ function pvPdf(a, gruppen, abgehakt) {
     [56, 'Typ', 'typ'], [0, 'Querschnitt\n[mm2]', 'querschnitt']],
     pv.straenge || [], 'Angaben zum PV-Array und PV-Strang') + 4;
 
-  const blockStrangmessung = y => tabelle(y, [
-    [44, 'Strang Nr.', 'nr'], [44, 'Polarität\ngeprüft', 'polaritaet'], [44, 'Verpolung\nGAK', 'verpolung'],
-    [62, 'UOC Gen. max', 'uocgen'], [52, 'ISC STC\nx 1.25', 'iscstc'], [44, 'UOC\n[V]', 'uoc'],
-    [44, 'ISC\n[A]', 'isc'], [48, 'RISO\n[MOhm]', 'riso'], [44, 'Umpp\n[V]', 'umpp'],
-    [44, 'Impp\n[A]', 'impp'], [0, 'RPA\n[Ohm]', 'rpa']],
-    pv.strangmessungen || [], 'Funktionsprüfung und Messungen – Stränge') + 4;
+  const blockStrangmessung = y => {
+    const fp = pv.funktionspruefung || {};
+    W.titel(X1, y + 11, 'Funktionsprüfung und Messungen – Stränge', 8.5);
+    let yy = y + 11 + ZL + 2;
+    // Bedingungen bei der Messung
+    if (fp.datum || fp.zeit || fp.wetter || fp.temperatur) {
+      let x = X1;
+      if (fp.datum) { W.label(x, yy, 'Datum'); W.wert(x + 34, yy, dat(fp.datum)); x += 120; }
+      if (fp.zeit) { W.label(x, yy, 'Zeit'); W.wert(x + 24, yy, fp.zeit); x += 84; }
+      if (fp.wetter) { W.label(x, yy, 'Umgebungsbedingungen'); W.wert(x + 106, yy, fp.wetter); x += 190; }
+      if (fp.temperatur) { W.label(x, yy, 'Temperatur'); W.wert(x + 56, yy, fp.temperatur + ' °C'); }
+      yy += ZL;
+    }
+    const methode = PV_SPANNUNG.find(([w]) => w === fp.spannung);
+    if (methode) {
+      W.label(X1, yy, 'Maximale Generatorspannung');
+      W.wert(X1 + 140, yy, methode[1]);
+      yy += ZL;
+    }
+    // UOC Gen. max wird aus Strang- und Modulangaben gerechnet, sonst gilt der eigene Eintrag
+    const zeilen = (pv.strangmessungen || []).map(z => Object.assign({}, z, {
+      uocgen: pvUocGenMax(pv, z.nr) || z.uocgen || '',
+      iscstc: pvIscStc(pv, z.nr) || z.iscstc || ''
+    }));
+    // Luft zwischen der letzten Kopfzeile und dem Tabellenrahmen
+    return tabelle(yy - 3, [
+      [44, 'Strang Nr.', 'nr'], [44, 'Polarität\ngeprüft', 'polaritaet'], [44, 'Verpolung\nGAK', 'verpolung'],
+      [62, 'UOC Gen. max', 'uocgen'], [52, 'ISC STC\nx 1.25', 'iscstc'], [44, 'UOC\n[V]', 'uoc'],
+      [44, 'ISC\n[A]', 'isc'], [48, 'RISO\n[MOhm]', 'riso'], [44, 'Umpp\n[V]', 'umpp'],
+      [44, 'Impp\n[A]', 'impp'], [0, 'RPA\n[Ohm]', 'rpa']], zeilen) + 4;
+  };
 
   // Bausteine, die mit dem MPP übereinstimmen, werden dort wiederverwendet
   const gemeinsam = mppBloecke(W, doc, { L, R, X1, X2, MID, ZH, ZL }, a, abgehakt, eig, f, bew, wirInstallateur, SICHT_PV);
@@ -1101,7 +1188,7 @@ function pvPdf(a, gruppen, abgehakt) {
                    gemeinsam.liste('Sichtprüfung des Systems (Ziffer 5.2)'),
                    gemeinsam.unterschriften,
                    'neueSeite',
-                   blockSystem, blockModule, blockWr, blockStraenge,
+                   blockSystem, blockModule, blockWr, blockSpeicher, blockStraenge,
                    gemeinsam.geraete, blockStrangmessung];
 
   let seiten = 1;
@@ -1288,6 +1375,10 @@ function mppBloecke(W, doc, M, a, abgehakt, eig, f, bew, wirInstallateur, sichtL
     W.label(X1, yy, 'Stockw., Lage'); W.wert(X1 + 66, yy, a.stockwerk);
     yy += ZH;
     W.label(X1, yy, 'Stromkunde'); W.wert(X1 + 66, yy, a.stromkunde);
+    if (k.pv && (a.sk_angaben || {}).pronovo) {
+      W.label(X2, yy, 'Pronovo Projektnummer');
+      W.wert(X2 + 110, yy, a.sk_angaben.pronovo);
+    }
     yy += ZH;
     W.label(X1, yy, 'Zähler-Nr.'); W.wert(X1 + 66, yy, a.zaehler_nr);
     W.label(X2, yy, 'Inst.-Anzeige Nr./ Jahr');
@@ -1306,7 +1397,8 @@ function mppBloecke(W, doc, M, a, abgehakt, eig, f, bew, wirInstallateur, sichtL
                     'Abnahmekontrolle (AK)': 'ak', 'Periodische Kontrolle (PK)': 'pk' };
   const grundAn = name => P.wahl === name || !!P[ALT_GRUND[name]];
   const artAn = name => KA.wahl === name || !!KA[ALT_ART[name]];
-  const kontrollDatum = KA.datum || KA.datum_sk || KA.datum_akpk || '';
+  const datumSk = KA.datum_sk || KA.datum || '';
+  const datumAkpk = KA.datum_akpk || '';
 
   const pruefgrund = y => {
     const CK = X1 + 118;
@@ -1324,8 +1416,10 @@ function mppBloecke(W, doc, M, a, abgehakt, eig, f, bew, wirInstallateur, sichtL
       if (art) W.haken(CK, yy, art, true);
       yy += ZH;
       if (P.freitext) { W.kasten(X1, yy - 5.6, true); W.txt(X1 + 10, yy, P.freitext, 7.5); yy += ZH; }
-      if (kontrollDatum) {
-        W.label(X1, yy, 'Datum der Kontrolle'); W.wert(X1 + 96, yy, kontrollDatum);
+      if (datumSk || datumAkpk) {
+        let x = X1;
+        if (datumSk) { W.label(x, yy, 'Datum Kontrolle SK'); W.wert(x + 92, yy, dat(datumSk)); x += 170; }
+        if (datumAkpk) { W.label(x, yy, 'Datum Kontrolle AK/PK'); W.wert(x + 106, yy, dat(datumAkpk)); }
         yy += ZH;
       }
     } else {
@@ -1342,9 +1436,8 @@ function mppBloecke(W, doc, M, a, abgehakt, eig, f, bew, wirInstallateur, sichtL
       W.haken(CK, yy, 'Periodische Kontrolle (PK)', artAn('Periodische Kontrolle (PK)'));
       yy += ZH;
       if (P.freitext) { W.kasten(X1, yy - 5.6, true); W.txt(X1 + 10, yy, P.freitext, 7.5); yy += ZH; }
-      const sk = artAn('Schlusskontrolle (NIV Art. 14)') || artAn('Schlusskontrolle (NIV Art. 7/9)');
-      W.label(X1, yy, sk ? 'Datum der Kontrolle SK' : 'Datum der Kontrolle AK/PK');
-      W.wert(X1 + 108, yy, kontrollDatum);
+      W.label(X1, yy, 'Datum der Kontrolle SK'); W.wert(X1 + 108, yy, dat(datumSk));
+      W.label(X2, yy, 'Datum der Kontrolle AK/PK'); W.wert(X2 + 150, yy, dat(datumAkpk));
       yy += ZH;
     }
     W.umbruch(k.kontrollumfang, R - X2 - 10, 8.5, true).forEach((z, i) => {
@@ -1401,7 +1494,7 @@ function mppBloecke(W, doc, M, a, abgehakt, eig, f, bew, wirInstallateur, sichtL
     W.titel(X1, y + 12, 'Unterschrift Auftragnehmer', 9);
     W.label(X2, y + 12, 'Gegenzeichnung', 9);
     const yy = y + 12 + ZH;
-    const heute = new Date().toLocaleDateString('de-CH');
+    const heute = dat(new Date());
     const u = (S.unterschriften || []).find(z => z.rolle === 'kontrollberechtigt');
     W.label(X1, yy, 'Datum'); W.wert(X1 + 34, yy, u ? heute : '');
     W.label(X1, yy + ZH, 'Kontrollberechtigter');
@@ -1723,24 +1816,17 @@ function sinaPdf(a, gruppen) {
   titel(X2, y + 12, 'Kontrollumfang / ausgeführte Installation');
   yy = y + 12 + ZH + 1;
   const umfangOben = yy;
-  haken(X1, yy, 'Neuanlage', grundAn('Neuanlage'));
-  haken(CK, yy, 'Schlusskontrolle (NIV Art. 14)', artAn('Schlusskontrolle (NIV Art. 14)'));
-  yy += ZH;
-  haken(X1, yy, 'Bestehende Anlage', grundAn('Bestehende Anlage'));
-  haken(CK, yy, 'Schlusskontrolle (NIV Art. 7/9)', artAn('Schlusskontrolle (NIV Art. 7/9)'));
-  yy += ZH;
-  haken(X1 + 12, yy, 'Änderung', grundAn('Änderung'));
-  haken(CK, yy, 'Abnahmekontrolle (AK)', artAn('Abnahmekontrolle (AK)'));
-  yy += ZH;
-  haken(X1 + 12, yy, 'Erweiterung', grundAn('Erweiterung'));
-  haken(CK, yy, 'Periodische Kontrolle (PK)', artAn('Periodische Kontrolle (PK)'));
-  yy += ZH;
-  kasten(X1, yy - 5.6, !!P.freitext); txt(X1 + 10, yy, P.freitext || '', 7.5);
-  yy += ZH;
-  const skGewaehlt = artAn('Schlusskontrolle (NIV Art. 14)') || artAn('Schlusskontrolle (NIV Art. 7/9)');
-  const datumKontrolle = KA.datum || KA.datum_sk || KA.datum_akpk || '';
-  label(X1, yy, 'Datum der Kontrolle SK'); wert(X1 + 108, yy, skGewaehlt ? datumKontrolle : '');
-  label(X2, yy, 'Datum der Kontrolle AK/PK'); wert(X2 + 150, yy, skGewaehlt ? '' : datumKontrolle);
+  // Nur das Gewählte – das spart die leeren Kästchenzeilen
+  const grundGewaehlt = PRUEFGRUENDE.find(grundAn);
+  const artGewaehlt = KONTROLLARTEN.find(artAn);
+  if (grundGewaehlt) haken(X1, yy, grundGewaehlt, true);
+  if (artGewaehlt) haken(CK, yy, artGewaehlt, true);
+  if (grundGewaehlt || artGewaehlt || P.freitext) yy += ZH;
+  if (P.freitext) { kasten(X1, yy - 5.6, true); txt(X1 + 10, yy, P.freitext, 7.5); yy += ZH; }
+  const datumSk = KA.datum_sk || KA.datum || '';
+  const datumAkpk = KA.datum_akpk || '';
+  label(X1, yy, 'Datum der Kontrolle SK'); wert(X1 + 108, yy, dat(datumSk));
+  label(X2, yy, 'Datum der Kontrolle AK/PK'); wert(X2 + 150, yy, dat(datumAkpk));
   // Kontrollumfang mehrzeilig
   doc.setFont('helvetica', 'bold'); doc.setFontSize(8.5);
   doc.splitTextToSize(String(k.kontrollumfang || ''), R - X2 - 10).forEach((z, i) => {
@@ -1756,20 +1842,21 @@ function sinaPdf(a, gruppen) {
   let xs = X1 + 250;
   ['TN-S', 'TN-C', 'TN-C-S'].forEach(s => { xs += haken(xs, y + 12, s, a.schutzsystem === s) + 22; });
   yy = y + 12 + ZH;
+  // Anschlussüberstromunterbrecher: eine Zeile statt zwei
   label(X1, yy, 'Anschlussüberstromunterbrecher');
-  label(X1 + 190, yy, 'Art, Charakteristik');
-  label(R - 90, yy, 'IN'); label(R - 30, yy, 'A');
-  yy += ZH + 2;
+  wert(X1 + 152, yy, k.hak || '', 8);
+  yy += ZH;
   txt(X1, yy, 'Überstrom-Schutzorgan am Anschlusspkt. d. Inst.', 7, true);
-  wert(X1 + 208, yy, k.hak || '', 8);
   yy += 10;
-  const sp = [[X1, 128, 'Art, Charakteristik', 'charakt'], [X1 + 128, 50, 'IN [A]', 'in_a'],
-              [X1 + 178, 62, 'IK Anf. [A]', 'ik_anf_pe'], [X1 + 240, 62, 'IK Ende [A]', 'ik_end_pe'],
-              [X1 + 302, 62, 'IK Anf. [A]', 'ik_anf_n'], [X1 + 364, 62, 'IK Ende [A]', 'ik_end_n'],
-              [X1 + 426, 50, 'RISO [MOhm]', 'riso'], [X1 + 476, 47, 'ILeck [mA]', 'ileck']];
+  // Neu mit «Bezeichnung»; «Art, Charakt.» dafür schmaler
+  const sp = [[X1, 96, 'Bezeichnung', 'bez'], [X1 + 96, 76, 'Art, Charakt.', 'charakt'],
+              [X1 + 172, 42, 'IN [A]', 'in_a'],
+              [X1 + 214, 56, 'IK Anf. [A]', 'ik_anf_pe'], [X1 + 270, 56, 'IK Ende [A]', 'ik_end_pe'],
+              [X1 + 326, 56, 'IK Anf. [A]', 'ik_anf_n'], [X1 + 382, 56, 'IK Ende [A]', 'ik_end_n'],
+              [X1 + 438, 46, 'RISO [MOhm]', 'riso'], [X1 + 484, 39, 'ILeck [mA]', 'ileck']];
   const mitte = (x0, x1, s) => { doc.setFontSize(7.5); label((x0 + x1 - doc.getTextWidth(s)) / 2, yy, s); };
-  mitte(sp[2][0], sp[3][0] + sp[3][1], 'L-PE');
-  mitte(sp[4][0], sp[5][0] + sp[5][1], 'L-N');
+  mitte(sp[3][0], sp[4][0] + sp[4][1], 'L-PE');
+  mitte(sp[5][0], sp[6][0] + sp[6][1], 'L-N');
   yy += 4;
   const tabOben = yy;
   line(L, yy, R, yy);
@@ -1799,7 +1886,7 @@ function sinaPdf(a, gruppen) {
   titel(X1, yy, 'Unterschriften Elektro-Installateur', 8);
   titel(X2, yy, 'Unterschriften unabhängiges Kontrollorgan', 8);
   yy += ZH;
-  const heute = new Date().toLocaleDateString('de-CH');
+  const heute = dat(new Date());
   const felder = [[X1, 'kontrollberechtigt', !wirInstallateur], [X1 + 128, 'unterschriftsberechtigt', !wirInstallateur],
                   [X2, 'kontrollberechtigt', wirInstallateur], [X2 + 128, 'unterschriftsberechtigt', wirInstallateur]];
   felder.forEach(([x, rolle, fremd]) => {
@@ -2661,7 +2748,7 @@ async function listeJetztLaden() {
           ${fremd ? '<span class="statusbadge sb-me">geteilt mit uns</span>' : ''}
           ${k.partner_firma_id && !fremd ? '<span class="statusbadge sb-me">geteilt</span>' : ''}</div>
         <div class="ks">
-          ${k.plan_datum ? '📅 <b>' + esc(new Date(k.plan_datum + 'T12:00:00').toLocaleDateString('de-CH')) + '</b> · ' : ''}
+          ${k.plan_datum ? '📅 <b>' + esc(dat(k.plan_datum)) + '</b> · ' : ''}
           ${k.auftrag_nr ? esc(k.auftrag_nr) + ' · ' : ''}${esc(k.gebaeudeart || '–')}
           ${k.eig && k.eig.name ? ' · ' + esc(k.eig.name) : ''}
           ${k.zugewiesen ? ' · 👤 ' + esc(k.zugewiesen) : ''}
@@ -3051,13 +3138,54 @@ async function renderAnlagen() {
        ['uoc', 'Uoc [V]', 70], ['isc', 'Isc [A]', 70], ['anzahl', 'Anzahl', 70]])}
     ${pvTabelle('wr', 'Wechselrichter', pv.wr || [],
       [['typ', 'Typ Nr.', 60], ['hersteller', 'Hersteller', 0], ['modell', 'Modell', 0],
+       ['seriennr', 'Seriennummer', 0], ['gridcode', 'Gridcode', 90],
        ['pac', 'PAC [kVA]', 80], ['anzahl', 'Anzahl', 70]])}
+    <label class="f" style="margin-top:18px">Stationäre elektrische Speichersysteme</label>
+    <div class="row" style="align-items:flex-end">
+      <div><label class="f">Kopplung</label>
+        <select id="pv_speicher"><option value="">– keine Angabe –</option>
+          ${[['keine', 'Keine'], ['ac', 'AC gekoppelt'], ['dc', 'DC gekoppelt']]
+            .map(([w, t]) => `<option value="${w}" ${(pv.speicher || {}).kopplung === w ? 'selected' : ''}>${t}</option>`).join('')}
+        </select></div>
+      <div class="narrow" style="flex:0 0 190px"><label class="f">Datum Inbetriebnahme</label>
+        <input type="date" id="pv_sp_inbetrieb" value="${esc((pv.speicher || {}).inbetriebnahme || '')}"></div>
+      <div class="narrow" style="flex:0 0 170px"><label class="f">Speicherkapazität [kWh]</label>
+        <input type="text" id="pv_sp_kwh" value="${esc(pvSpeicherKwh(pv))}" readonly></div>
+    </div>
+    <div class="hint">Die Kapazität wird aus der Tabelle gerechnet: Speicherkapazität × Anzahl.</div>
+    ${pvTabelle('batterien', 'Batteriespeicher', pv.batterien || [],
+      [['hersteller', 'Hersteller', 0], ['modell', 'Modell', 0],
+       ['kapazitaet', 'Speicherkapazität [kWh]', 150], ['anzahl', 'Anzahl', 70]])}
+
     ${pvTabelle('straenge', 'Stränge', pv.straenge || [],
       [['nr', 'Strang Nr.', 70], ['modultyp', 'Modultyp Nr.', 80], ['anzahl', 'Module je Strang', 90],
        ['wr', 'auf WR Nr.', 70], ['teilarray', 'Teilarray', 80], ['typ', 'Typ (Kabel)', 90],
        ['querschnitt', 'Quer. [mm²]', 80]])}
+    <label class="f" style="margin-top:18px">Funktionsprüfung und Messungen</label>
+    <div class="row">
+      <div class="narrow" style="flex:0 0 170px"><label class="f">Datum</label>
+        <input type="date" id="pv_fp_datum" value="${esc((pv.funktionspruefung || {}).datum || '')}"></div>
+      <div class="narrow" style="flex:0 0 130px"><label class="f">Zeit</label>
+        <input type="time" id="pv_fp_zeit" value="${esc((pv.funktionspruefung || {}).zeit || '')}"></div>
+      <div><label class="f">Umgebungsbedingungen</label>
+        <select id="pv_fp_wetter"><option value="">–</option>
+          ${PV_WETTER.map(w => `<option value="${esc(w)}" ${(pv.funktionspruefung || {}).wetter === w ? 'selected' : ''}>${esc(w)}</option>`).join('')}
+        </select></div>
+      <div class="narrow" style="flex:0 0 150px"><label class="f">Temperatur [°C]</label>
+        <input type="text" id="pv_fp_temp" inputmode="decimal" value="${esc((pv.funktionspruefung || {}).temperatur || '')}"></div>
+    </div>
+    <label class="f">Maximale Generatorspannung</label>
+    <select id="pv_fp_spannung"><option value="">– Methode wählen –</option>
+      ${PV_SPANNUNG.map(([w, t]) => `<option value="${w}" ${(pv.funktionspruefung || {}).spannung === w ? 'selected' : ''}>${esc(t)}</option>`).join('')}
+    </select>
+    <div class="hint">Bei einem <b>Korrekturfaktor</b> wird «UOC Gen. max» je Strang gerechnet:
+      Module je Strang × Uoc des Moduls × Faktor. Beim modulspezifischen Temperaturkoeffizienten
+      trägst du den Wert selbst ein. <b>ISC STC × 1.25</b> wird immer gerechnet: Isc des Moduls × 1.25.</div>
     ${pvTabelle('strangmessungen', 'Strangmessungen', pv.strangmessungen || [],
-      [['nr', 'Strang', 60], ['uoc', 'UOC [V]', 70], ['isc', 'ISC [A]', 70], ['riso', 'RISO [MΩ]', 80],
+      [['nr', 'Strang', 60], ['polaritaet', 'Polarität geprüft', 110], ['verpolung', 'Verpolung GAK', 100],
+       ['uocgen', 'UOC Gen. max [V]', 110, z => pvUocGenMax(pv, z.nr)],
+       ['iscstc', 'ISC STC × 1.25 [A]', 120, z => pvIscStc(pv, z.nr)],
+       ['uoc', 'UOC [V]', 70], ['isc', 'ISC [A]', 70], ['riso', 'RISO [MΩ]', 80],
        ['umpp', 'Umpp [V]', 70], ['impp', 'Impp [A]', 70], ['rpa', 'RPA [Ω]', 70]])}
   </div>`;
 
@@ -3100,8 +3228,12 @@ async function renderAnlagen() {
     <div class="row">
       <div><label class="f">Prüfgrund – eigener Text <span class="hint" style="display:inline">(nur falls nötig)</span></label>
         <input type="text" id="a_pgrund_txt" value="${esc(anlPruefgrund(a).freitext || '')}"></div>
-      <div class="narrow" style="flex:0 0 170px"><label class="f">Datum der Kontrolle</label>
-        <input type="date" id="a_kdatum" value="${esc(anlKontrollart(a).datum || '')}"></div>
+      <div class="narrow" style="flex:0 0 165px"><label class="f">Datum Kontrolle SK</label>
+        <input type="date" id="a_kdatum" value="${esc(anlKontrollart(a).datum_sk || anlKontrollart(a).datum || '')}"></div>
+      <div class="narrow" style="flex:0 0 165px"><label class="f">Datum Kontrolle AK/PK</label>
+        <input type="date" id="a_kdatum2" value="${esc(anlKontrollart(a).datum_akpk || '')}"></div>
+      ${k.pv ? `<div class="narrow" style="flex:0 0 190px"><label class="f">Pronovo Projektnummer</label>
+        <input type="text" id="a_pronovo" value="${esc((a.sk_angaben || {}).pronovo || '')}"></div>` : ''}
       <div class="narrow" style="flex:0 0 150px"><label class="f">Inst.-Anzeige Nr.</label>
         <input type="text" id="a_anz_nr" value="${esc(anlKontrollart(a).anzeige_nr || '')}"></div>
       <div class="narrow" style="flex:0 0 110px"><label class="f">Jahr</label>
@@ -3146,6 +3278,12 @@ async function renderAnlagen() {
     feldSpeichern('anlagen', a.id, 'sk_angaben', a.sk_angaben);
   });
 
+  const pronovo = $('#a_pronovo');
+  if (pronovo) pronovo.addEventListener('input', () => {
+    a.sk_angaben = Object.assign({}, a.sk_angaben, { pronovo: pronovo.value });
+    feldSpeichern('anlagen', a.id, 'sk_angaben', a.sk_angaben);
+  });
+
   // Prüfgrund und durchgeführte Kontrolle dieser Anlage (in sk_angaben)
   const anlBlock = (block, schluessel, el) => {
     const ereignis = el.tagName === 'SELECT' ? 'change' : 'input';
@@ -3157,7 +3295,8 @@ async function renderAnlagen() {
     });
   };
   [['pruefgrund', 'wahl', 'a_pgrund'], ['pruefgrund', 'freitext', 'a_pgrund_txt'],
-   ['kontrollart', 'wahl', 'a_kart'], ['kontrollart', 'datum', 'a_kdatum'],
+   ['kontrollart', 'wahl', 'a_kart'], ['kontrollart', 'datum_sk', 'a_kdatum'],
+   ['kontrollart', 'datum_akpk', 'a_kdatum2'],
    ['kontrollart', 'anzeige_nr', 'a_anz_nr'], ['kontrollart', 'anzeige_jahr', 'a_anz_jahr']]
     .forEach(([block, schluessel, id]) => { const el = $('#' + id); if (el) anlBlock(block, schluessel, el); });
 
@@ -3216,6 +3355,55 @@ function pvSumme(zeilen, wertFeld, teiler) {
 
 const pvLeistungDc = pv => pvSumme(pv.module, 'pmpp', 1000);
 const pvLeistungAc = pv => pvSumme(pv.wr, 'pac', 1);
+// Speicher: die Kapazitäten stehen schon in kWh, darum ohne Teiler
+const pvSpeicherKwh = pv => pvSumme(pv.batterien, 'kapazitaet', 1);
+
+// Umgebungsbedingungen und Methode für die maximale Generatorspannung
+const PV_WETTER = ['sonnig', 'bewölkt', 'wechselhaft', 'Regen'];
+const PV_SPANNUNG = [
+  ['modul', 'modulspezifischer Temperaturkoeffizient', null],
+  ['k115', 'Korrekturfaktor 1.15 (bis 800 m ü.M.)', 1.15],
+  ['k12', 'Korrekturfaktor 1.2 (bis 1500 m ü.M.)', 1.2],
+  ['k125', 'Korrekturfaktor 1.25 (über 1500 m ü.M.)', 1.25]
+];
+
+// «Strang 1», «1», «S1» sollen als dasselbe gelten
+function pvNrGleich(a, b) {
+  const rein = x => String(x == null ? '' : x).toLowerCase().replace(/[^a-z0-9]/g, '');
+  const zahl = x => (String(x == null ? '' : x).match(/\d+/) || [])[0];
+  if (!rein(a) || !rein(b)) return false;
+  if (rein(a) === rein(b)) return true;
+  const za = zahl(a), zb = zahl(b);
+  return !!za && za === zb;
+}
+
+/* Maximale Generatorspannung eines Strangs:
+   Strang-Nr. der Messzeile → Strangangaben (Modulzahl + Modultyp)
+   → Modulangaben (Uoc) → Modulzahl × Uoc × Korrekturfaktor.
+   Beim modulspezifischen Temperaturkoeffizienten wird nicht gerechnet – dann
+   trägt die kontrollierende Person den Wert selbst ein. */
+// ISC STC × 1.25: der Isc des zugehörigen Moduls mal dem festen Faktor 1.25
+function pvIscStc(pv, strangNr) {
+  const strang = (pv.straenge || []).find(z => pvNrGleich(z.nr, strangNr));
+  if (!strang) return '';
+  const modul = (pv.module || []).find(m => pvNrGleich(m.typ, strang.modultyp));
+  if (!modul) return '';
+  const wert = pvZahl(modul.isc) * 1.25;
+  return wert ? String(Math.round(wert * 100) / 100) : '';
+}
+
+function pvUocGenMax(pv, strangNr) {
+  const gewaehlt = ((pv.funktionspruefung || {}).spannung) || '';
+  const eintrag = PV_SPANNUNG.find(([w]) => w === gewaehlt);
+  const faktor = eintrag && eintrag[2];
+  if (!faktor) return '';
+  const strang = (pv.straenge || []).find(z => pvNrGleich(z.nr, strangNr));
+  if (!strang) return '';
+  const modul = (pv.module || []).find(m => pvNrGleich(m.typ, strang.modultyp));
+  if (!modul) return '';
+  const wert = pvZahl(strang.anzahl) * pvZahl(modul.uoc) * faktor;
+  return wert ? String(Math.round(wert * 10) / 10) : '';
+}
 
 function pvTabelle(schluessel, titel, zeilen, spalten) {
   return `<label class="f" style="margin-top:14px">${esc(titel)}</label>
@@ -3224,7 +3412,12 @@ function pvTabelle(schluessel, titel, zeilen, spalten) {
         <thead><tr>${spalten.map(([, t, b]) => `<th ${b ? `style="width:${b}px"` : ''}>${esc(t)}</th>`).join('')}<th style="width:34px"></th></tr></thead>
         <tbody>
           ${zeilen.map((z, i) => `<tr data-i="${i}">
-            ${spalten.map(([feld]) => `<td><input type="text" data-feld="${feld}" value="${esc(z[feld] || '')}"></td>`).join('')}
+            ${spalten.map(([feld, , , rechnen]) => {
+              const wert = rechnen ? rechnen(z) : null;
+              return wert
+                ? `<td><input type="text" data-feld="${feld}" value="${esc(wert)}" readonly></td>`
+                : `<td><input type="text" data-feld="${feld}" value="${esc(z[feld] || '')}"></td>`;
+            }).join('')}
             <td><button class="iconbtn pvdel" title="Zeile löschen">🗑</button></td>
           </tr>`).join('')}
         </tbody>
@@ -3238,10 +3431,27 @@ function pvVerdrahten(a) {
   // Die gerechneten Leistungen sofort nachziehen, ohne die Ansicht neu zu zeichnen
   const leistungenZeigen = () => {
     const pv = holen();
-    const dc = $('#pv_kwdc'), ac = $('#pv_kvaac');
+    const dc = $('#pv_kwdc'), ac = $('#pv_kvaac'), sp = $('#pv_sp_kwh');
     if (dc) dc.value = pvLeistungDc(pv);
     if (ac) ac.value = pvLeistungAc(pv);
+    if (sp) sp.value = pvSpeicherKwh(pv);
   };
+  // Angaben zum Speichersystem (eigener Block in den PV-Daten)
+  const speicherSetzen = neu => setzen({ speicher: Object.assign({}, holen().speicher || {}, neu) });
+  const fpSetzen = neu => setzen({ funktionspruefung: Object.assign({}, holen().funktionspruefung || {}, neu) });
+  [['pv_fp_datum', 'datum'], ['pv_fp_zeit', 'zeit'], ['pv_fp_wetter', 'wetter'],
+   ['pv_fp_temp', 'temperatur'], ['pv_fp_spannung', 'spannung']].forEach(([id, feld]) => {
+    const el = $('#' + id);
+    if (!el) return;
+    el.addEventListener(el.tagName === 'SELECT' ? 'change' : 'input', () => {
+      fpSetzen({ [feld]: el.value });
+      if (feld === 'spannung') renderAnlagen();     // die gerechneten Spannungen neu setzen
+    });
+  });
+  const kopplung = $('#pv_speicher');
+  if (kopplung) kopplung.addEventListener('change', () => speicherSetzen({ kopplung: kopplung.value }));
+  const spDatum = $('#pv_sp_inbetrieb');
+  if (spDatum) spDatum.addEventListener('input', () => speicherSetzen({ inbetriebnahme: spDatum.value }));
   const setzen = neu => {
     a.sk_angaben = Object.assign({}, a.sk_angaben, { pv: Object.assign({}, holen(), neu) });
     feldSpeichern('anlagen', a.id, 'sk_angaben', a.sk_angaben);
@@ -4182,7 +4392,7 @@ async function optGrund() {
       <button class="btn primary" id="g_save">Speichern</button>
       <button class="btn danger small" id="g_reset">Auf Standard zurücksetzen</button>
     </div>
-    <div class="hint" style="margin-top:12px">App-Version: <b>Online 1.1</b></div>
+    <div class="hint" style="margin-top:12px">App-Version: <b>Online 1.7</b></div>
   </div>`;
 
   // Ändern darf nur der Admin (die Datenbank lässt es ohnehin nur ihm zu)
@@ -4554,7 +4764,7 @@ async function optFirmen() {
             · <b>${zahl(f.id, b => b.status === 'frei')}</b> aktive Mitarbeiter
             ${zahl(f.id, b => b.status === 'offen') ? '· ' + zahl(f.id, b => b.status === 'offen') + ' warten' : ''}
             · Code <code>${esc(f.registrier_code)}</code>
-            · seit ${esc(new Date(f.erstellt_am).toLocaleDateString('de-CH'))}</div>
+            · seit ${esc(dat(f.erstellt_am))}</div>
         </div>
         <button class="btn small" data-act="${f.aktiv ? 'sperren' : 'aktivieren'}">${f.aktiv ? 'Sperren' : 'Aktivieren'}</button>
       </div>`).join('') || '<div class="empty">Noch keine Firmen angelegt.</div>'}`;
