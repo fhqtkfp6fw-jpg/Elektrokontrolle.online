@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Elektrokontrolle online</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<!-- Anmeldung -->
+<div id="auth" class="authwrap">
+  <div class="authbox">
+    <h1>⚡ Elektrokontrolle <span>online</span></h1>
+
+    <div id="authtabs" class="typtoggle">
+      <button class="t_login on">Anmelden</button>
+      <button class="t_reg">Neu registrieren</button>
+    </div>
+
+    <form id="loginform" autocomplete="on">
+      <label class="f">E-Mail</label>
+      <input type="email" id="l_mail" autocomplete="username" inputmode="email" autocapitalize="none" required>
+      <label class="f">Passwort</label>
+      <input type="password" id="l_pw" autocomplete="current-password" required>
+      <button class="btn primary wide" type="submit">Anmelden</button>
+      <button class="btn wide" type="button" id="l_forgot" style="margin-top:8px">Passwort vergessen</button>
+    </form>
+
+    <form id="regform" style="display:none" autocomplete="on">
+      <label class="f">Firmen-Code <span class="hint" style="display:inline">– erhältst du von deinem Vorgesetzten</span></label>
+      <input type="text" id="r_code" autocapitalize="characters" required>
+      <div class="row">
+        <div class="narrow" style="flex:0 0 110px"><label class="f">Kürzel</label><input type="text" id="r_kuerzel" autocapitalize="characters" maxlength="4" required></div>
+        <div><label class="f">Vor- und Nachname</label><input type="text" id="r_name" autocomplete="name" required></div>
+      </div>
+      <label class="f">E-Mail</label>
+      <input type="email" id="r_mail" autocomplete="username" inputmode="email" autocapitalize="none" required>
+      <label class="f">Passwort <span class="hint" style="display:inline">– mindestens 8 Zeichen</span></label>
+      <input type="password" id="r_pw" autocomplete="new-password" minlength="8" required>
+      <button class="btn primary wide" type="submit">Registrieren</button>
+    </form>
+
+    <div id="authmsg" class="authmsg"></div>
+  </div>
+</div>
+
+<!-- Anwendung -->
+<div id="app" style="display:none">
+  <div id="topbar">
+    <div class="brand">⚡ Elektrokontrolle <span>online</span></div>
+    <div id="ctxtitle"></div>
+    <div id="netstate" title="Verbindung"></div>
+    <div id="savestate"></div>
+    <button id="fsbtn" class="iconbtn" title="Vollbild">⛶</button>
+    <button id="userbtn" class="iconbtn" title="Konto"></button>
+  </div>
+
+  <div id="view"></div>
+
+  <div id="tabbar">
+    <button data-view="kontrollen" class="active"><span>🗂</span>Kontrollen</button>
+    <button data-view="kunde"><span>👤</span>Kunde</button>
+    <button data-view="uv"><span>🔌</span>Anlagen</button>
+    <button data-view="sicht"><span>👁</span>Sichtkontrolle</button>
+    <button data-view="fill"><span>⚡</span>Ausfüllen</button>
+    <button data-view="mess"><span>📋</span>Messen</button>
+    <button data-view="maengel"><span>⚠️</span>Mängel</button>
+    <button data-view="export"><span>📤</span>Abschluss</button>
+    <button data-view="settings"><span>⚙️</span>Optionen</button>
+  </div>
+</div>
+
+<div id="printarea"></div>
+
+<script src="config.js"></script>
+<script src="supabase.js"></script>
+<script src="jspdf.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
