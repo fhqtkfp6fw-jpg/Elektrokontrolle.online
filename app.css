@@ -303,3 +303,39 @@ input.fremdaenderung { background: #fff8dd; transition: background .4s; }
 
 /* Anzeige, wenn Änderungen noch unterwegs sind */
 #netstate.wartend { color: var(--accent); }
+
+/* Knopfzeile, die beim Scrollen oben stehen bleibt (Reiter Mängel) */
+.btnrow.klebrig {
+  position: sticky;
+  top: calc(var(--top-h) + env(safe-area-inset-top));
+  z-index: 20;
+  background: var(--bg);
+  margin: 0 -14px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+/* ------------------------------------------------------------------
+   Status der Anlage – Farbe UND Zeichen.
+   Die geöffnete Anlage trägt dieselbe Farbe, stark aufgehellt.
+   Gilt für die Anlagen-Chips, die Statusknöpfe und das Abzeichen.
+   ------------------------------------------------------------------ */
+.chip.st-eroeffnet,        button.btn.st-eroeffnet,        .statusbadge.st-eroeffnet        { background:#2563eb; border-color:#2563eb; color:#fff; }
+.chip.st-gemessen,         button.btn.st-gemessen,         .statusbadge.st-gemessen         { background:#0e8f9c; border-color:#0e8f9c; color:#fff; }
+.chip.st-abgeschlossen,    button.btn.st-abgeschlossen,    .statusbadge.st-abgeschlossen    { background:#16a34a; border-color:#16a34a; color:#fff; }
+.chip.st-beim_vnb,         button.btn.st-beim_vnb,         .statusbadge.st-beim_vnb         { background:#e07b16; border-color:#e07b16; color:#fff; }
+.chip.st-genehmigt,        button.btn.st-genehmigt,        .statusbadge.st-genehmigt        { background:#d4a017; border-color:#d4a017; color:#2e2200; }
+.chip.st-zurueckgewiesen,  button.btn.st-zurueckgewiesen,  .statusbadge.st-zurueckgewiesen  { background:#dc2626; border-color:#dc2626; color:#fff; }
+
+.chip.st-eroeffnet.active,       button.btn.st-eroeffnet.active       { background:#ffffff; color:#1d4ed8; }
+.chip.st-gemessen.active,        button.btn.st-gemessen.active        { background:#d6f2f5; color:#0a6570; }
+.chip.st-abgeschlossen.active,   button.btn.st-abgeschlossen.active   { background:#d3f5de; color:#116e33; }
+.chip.st-beim_vnb.active,        button.btn.st-beim_vnb.active        { background:#ffe6cd; color:#9c4f08; }
+.chip.st-genehmigt.active,       button.btn.st-genehmigt.active       { background:#fdf1c2; color:#7d5e00; }
+.chip.st-zurueckgewiesen.active, button.btn.st-zurueckgewiesen.active { background:#fcd7d7; color:#9d1717; }
+
+/* Statusknöpfe: nur der geltende Status trägt seine Farbe, die übrigen bleiben weiss */
+.statusbadge.st-eroeffnet, .statusbadge.st-gemessen, .statusbadge.st-abgeschlossen,
+.statusbadge.st-beim_vnb, .statusbadge.st-genehmigt, .statusbadge.st-zurueckgewiesen {
+  font-size: 13px; padding: 5px 12px;
+}

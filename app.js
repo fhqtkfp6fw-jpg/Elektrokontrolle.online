@@ -317,24 +317,72 @@ const istErstellerfirma = () => !!S.kontrolle && S.kontrolle.firma_id === S.prof
 // der ganze Abschluss-Reiter (Dokumente, Bericht, Arbeitszeit, Unterschriften).
 const SPERRE_FREI = ['k_bem', 'p_trennen'];
 
+/* Ist DIESE Anlage unterschrieben? Ältere Unterschriften ohne Anlagenbezug
+   gelten für die ganze Kontrolle. */
+function anlageUnterzeichnet(anlageId) {
+  const liste = S.unterschriften || [];
+  if (liste.some(u => !u.anlage_id)) return true;
+  return !!anlageId && liste.some(u => u.anlage_id === anlageId);
+}
+
 function sperreAnwenden() {
   const v = $('#view');
   if (!v || !S.kontrolle || !istUnterzeichnet()) return;
-  if (!$('#sperrbanner')) {
+  if (S.view === 'export') return;      // im Abschluss bleibt alles bedienbar
+
+  const hinweis = (txt) => {
+    if ($('#sperrbanner')) return;
     const banner = document.createElement('div');
     banner.id = 'sperrbanner';
     banner.className = 'robanner';
-    banner.innerHTML = '🔒 <b>Unterschrieben – gesperrt.</b> Die Angaben sind nur noch lesbar. '
-      + 'Zum Bearbeiten im Reiter 📤 Abschluss die Unterschriften entfernen (nur die Firma, welche die '
-      + 'Kontrolle angelegt hat) oder dort eine <b>Kopie</b> erstellen.';
+    banner.innerHTML = txt;
     v.insertBefore(banner, v.firstChild);
+  };
+  const sperren = wurzel => {
+    wurzel.querySelectorAll('input, textarea, select, button').forEach(el => {
+      if (SPERRE_FREI.includes(el.id)) return;
+      if (el.closest('.chips') && el.classList.contains('chip')) return;   // Anlagen-Wechsel
+      el.disabled = true;
+    });
+  };
+  const nachtrag = ' Zum Bearbeiten im Reiter 📤 Abschluss die Unterschriften entfernen (nur die Firma, '
+    + 'welche die Kontrolle angelegt hat) oder dort eine <b>Kopie</b> erstellen.';
+
+  // Kunde und Auftrag stehen auf JEDEM Formular – sobald irgendeine Anlage
+  // unterschrieben ist, dürfen sie nicht mehr geändert werden.
+  if (S.view === 'kunde') {
+    hinweis('🔒 <b>Es ist bereits unterschrieben.</b> Kunde und Auftrag erscheinen auf jedem Formular '
+      + 'und sind darum gesperrt – ausser dem Feld «Bemerkungen».' + nachtrag);
+    sperren(v);
+    return;
   }
-  if (S.view === 'export') return;      // im Abschluss bleibt alles bedienbar
-  v.querySelectorAll('input, textarea, select, button').forEach(el => {
-    if (SPERRE_FREI.includes(el.id)) return;
-    if (el.closest('.chips') && el.classList.contains('chip')) return;   // Anlagen-Wechsel
-    el.disabled = true;
-  });
+
+  // Mängel: nur die Einträge gesperrter Anlagen
+  if (S.view === 'maengel') {
+    let gesperrte = 0;
+    v.querySelectorAll('.mangelcard').forEach(karte => {
+      const m = (S.maengel || []).find(x => x.id === karte.dataset.mid);
+      if (m && anlageUnterzeichnet(m.anlage_id)) { sperren(karte); gesperrte++; }
+    });
+    if (gesperrte) {
+      hinweis('🔒 <b>Teilweise gesperrt.</b> Einträge zu bereits unterschriebenen Anlagen sind nur noch '
+        + 'lesbar; für die übrigen Anlagen kannst du normal weiterarbeiten.');
+    }
+    return;
+  }
+
+  // Anlagen, Messen, Sichtkontrolle, Ausfüllen: nur die gewählte Anlage prüfen
+  if (!anlageUnterzeichnet(S.anlageId)) {
+    const offene = (S.anlagen || []).filter(a => !anlageUnterzeichnet(a.id)).length;
+    if (offene < (S.anlagen || []).length) {
+      hinweis('ℹ️ In dieser Kontrolle sind bereits Anlagen unterschrieben. <b>Diese Anlage ist noch '
+        + 'offen</b> und kann normal bearbeitet werden.');
+    }
+    return;
+  }
+  hinweis('🔒 <b>Diese Anlage ist unterschrieben</b> und darum gesperrt. Andere Anlagen derselben '
+    + 'Kontrolle kannst du weiterhin bearbeiten.' + nachtrag);
+  sperren(v);
 }
 
 async function renderAbschluss() {
@@ -342,6 +390,7 @@ async function renderAbschluss() {
   if (!S.anlagen) await anlagenLaden();
   if (!S.unterschriften || !S.team || !S.arbeitszeit || !S.statusVerlauf) {
     v.innerHTML = '<div class="empty">Wird geladen …</div>';
+    if (S.kontrolle.partner_firma_id) await partnerFirmaLaden();
     if (!S.unterschriften) await unterschriftenLaden();
     if (!S.team) await teamLaden();
     if (!S.arbeitszeit) await arbeitszeitLaden();
@@ -350,11 +399,41 @@ async function renderAbschluss() {
   const k = S.kontrolle;
   const gesperrt = istUnterzeichnet();
 
+  /* Wer darf was unterschreiben? Die Befugnis vergibt der Firmen-Admin.
+     Jede Person unterschreibt nur im eigenen Namen, kann aber beide
+     Eigenschaften abdecken – und beide Firmen dürfen unterschreiben. */
+  const meineRollen = [
+    S.profil.darf_kontrollberechtigt !== false ? 'kontrollberechtigt' : null,
+    S.profil.darf_unterschriftsberechtigt !== false ? 'unterschriftsberechtigt' : null
+  ].filter(Boolean);
+  // Unterschrieben wird PRO ANLAGE (SiNa und MPP gehören zur Anlage).
+  const alleAnlagen = S.anlagen || [];
+  const unterzeichneteAnlagen = alleAnlagen.filter(a => anlageUnterzeichnet(a.id));
+  const offeneAnlagen = alleAnlagen.filter(a => !anlageUnterzeichnet(a.id));
+  const hatUnterschrift = (aid, r) => (S.unterschriften || [])
+    .some(u => u.benutzer_id === S.profil.id && u.rolle === r && u.anlage_id === aid);
+  // Eine Eigenschaft ist offen, solange mindestens eine Anlage sie noch braucht
+  const offeneRollen = meineRollen.filter(r => alleAnlagen.some(a => !hatUnterschrift(a.id, r)));
+  const unterschriftenDer = aid => (S.unterschriften || []).filter(u => u.anlage_id === aid || !u.anlage_id);
+
+  // Was fehlt noch? Bei geteilten Kontrollen müssen beide Firmen unterschreiben.
+  const firmenNoetig = k.partner_firma_id ? [k.firma_id, k.partner_firma_id] : [k.firma_id];
+  const fehlendeFirmen = firmenNoetig.filter(fid =>
+    !(S.unterschriften || []).some(u => u.firma_id === fid));
+  const nochOffen = fehlendeFirmen.length
+    ? fehlendeFirmen.map(fid => fid === S.profil.firma_id ? 'deine Firma'
+        : (S.partnerFirma && S.partnerFirma.name) || 'die Partnerfirma').join(' und ')
+    : '';
+
   v.innerHTML = `<h2>Abschluss</h2>
 
-    ${gesperrt ? `<div class="robanner" id="sperrbanner">🔒 <b>Diese Kontrolle ist unterschrieben und
-      darum gesperrt.</b> Alle Angaben sind sichtbar, aber nicht mehr änderbar – ausser dem Feld
-      «Bemerkungen» im Reiter Kunde.<br>
+    ${gesperrt ? `<div class="robanner" id="sperrbanner">🔒 <b>${offeneAnlagen.length
+        ? esc(unterzeichneteAnlagen.length) + ' von ' + esc(alleAnlagen.length) + ' Anlagen sind unterschrieben.'
+        : 'Alle Anlagen sind unterschrieben.'}</b>
+      Unterschriebene Anlagen sind gesperrt${offeneAnlagen.length
+        ? ' – die übrigen (' + esc(offeneAnlagen.map(a => a.name || 'ohne Name').join(', ')) + ') kannst du weiter bearbeiten'
+        : ''}. Kunde und Auftrag sind gesperrt, weil sie auf jedem Formular stehen – ausser dem Feld
+      «Bemerkungen».<br>
       ${istErstellerfirma()
         ? 'Zum Bearbeiten zuerst unten die Unterschriften entfernen – danach muss neu unterschrieben werden.'
         : 'Nur die Firma, welche die Kontrolle angelegt hat, kann die Unterschriften wieder entfernen.'}
@@ -376,7 +455,8 @@ async function renderAbschluss() {
 
     <div class="card">
       <h3 style="margin-top:0">Arbeitszeit</h3>
-      <div class="hint">Eigene Einträge für diese Kontrolle – für die Abrechnung.
+      <div class="hint">Für die Abrechnung. <b>Nur deine Firma sieht diese Stunden</b> –
+        bei einer geteilten Kontrolle führt jede Firma ihre eigene Zeit.
         ${S.arbeitszeit && S.arbeitszeit.length
           ? 'Summe: <b>' + S.arbeitszeit.reduce((s, z) => s + Number(z.stunden || 0), 0).toFixed(2) + ' h</b>'
           : ''}</div>
@@ -400,7 +480,8 @@ async function renderAbschluss() {
     <div class="card">
       <h3 style="margin-top:0">Dokumente</h3>
       <div class="hint">Pro Anlage entstehen ein <b>Sicherheitsnachweis (SiNa)</b> und ein
-        <b>${k.pv ? 'Mess- und Prüfprotokoll Photovoltaik' : 'Mess- und Prüfprotokoll'}</b>.
+        <b>Mess- und Prüfprotokoll</b> – bei Anlagen, die als Photovoltaik gekennzeichnet sind,
+        das PV-Protokoll.
         Die Angaben stammen aus den Reitern Kunde, Anlagen, Sichtkontrolle und Messen sowie aus den
         Firmenangaben (⚙️ Optionen).</div>
       ${(S.anlagen || []).length ? (S.anlagen || []).map(a => `
@@ -408,7 +489,7 @@ async function renderAbschluss() {
           <div style="flex:1;font-weight:600">${esc(a.name || 'Anlage ohne Name')}
             ${a.zaehler_nr ? `<span class="hint" style="display:inline">– Zähler ${esc(a.zaehler_nr)}</span>` : ''}</div>
           <button class="btn small" data-dok="sina">⬇︎ SiNa</button>
-          <button class="btn small" data-dok="mpp">⬇︎ ${k.pv ? 'PV-MPP' : 'MPP'}</button>
+          <button class="btn small" data-dok="mpp">⬇︎ ${istPv(a) ? 'PV-MPP' : 'MPP'}</button>
           <button class="btn small" data-dok="csv">⬇︎ CSV</button>
         </div>`).join('')
         : '<div class="empty">Noch keine Anlage erfasst.</div>'}
@@ -469,22 +550,46 @@ async function renderAbschluss() {
 
     <div class="card">
       <h3 style="margin-top:0">Unterschriften</h3>
-      ${gesperrt ? '' : `<div class="hint">Wähle aus, in welcher Eigenschaft du unterschreibst. Sobald
-        unterschrieben ist, wird die Kontrolle gesperrt.</div>
+      ${offeneRollen.length ? `<div class="hint">Hier unterschreibst du <b>in deinem eigenen Namen</b>.
+        Hake an, in welcher Eigenschaft – beides zusammen ist möglich.${gesperrt
+          ? ' Die Kontrolle ist bereits unterschrieben und darum gesperrt; weitere Unterschriften bleiben trotzdem möglich.'
+          : ' Ab der ersten Unterschrift ist die Kontrolle gesperrt.'}</div>
+      <label class="f" style="margin-top:10px">Welche Anlagen unterschreibst du?</label>
+      <div class="chips" id="signAnlagen">
+        ${alleAnlagen.map(a => `<label class="chip"><input type="checkbox" class="sign_a" value="${a.id}" checked
+            style="width:auto;margin-right:6px">${esc(a.name || 'Anlage ohne Name')}</label>`).join('')
+          || '<span class="hint">Noch keine Anlage erfasst.</span>'}
+      </div>
+      <div class="hint">Unterschrieben werden <b>SiNa und Mess- und Prüfprotokoll dieser Anlagen</b>.</div>
       <div class="row" style="align-items:flex-end">
         <div class="narrow" style="flex:0 0 auto">
-          <label class="f"><input type="checkbox" id="u_kb" checked style="width:auto;margin-right:8px">Kontrollberechtigter</label>
-          <label class="f"><input type="checkbox" id="u_ub" style="width:auto;margin-right:8px">Unterschriftsberechtigter</label>
+          ${offeneRollen.includes('kontrollberechtigt')
+            ? '<label class="f"><input type="checkbox" id="u_kb" checked style="width:auto;margin-right:8px">Kontrollberechtigter</label>' : ''}
+          ${offeneRollen.includes('unterschriftsberechtigt')
+            ? `<label class="f"><input type="checkbox" id="u_ub" ${offeneRollen.includes('kontrollberechtigt') ? '' : 'checked'} style="width:auto;margin-right:8px">Unterschriftsberechtigter</label>` : ''}
         </div>
         <div class="narrow" style="flex:0 0 auto"><button class="btn primary" id="btnSign">🖊 Jetzt unterschreiben</button></div>
-      </div>`}
+      </div>`
+      : `<div class="hint">${meineRollen.length
+          ? 'Du hast in allen dir erlaubten Eigenschaften bereits unterschrieben.'
+          : 'Dein Konto ist für keine Unterschrift freigegeben – ein Administrator deiner Firma kann '
+            + 'das unter ⚙️ Optionen → 👥 Mitarbeiter ändern.'}</div>`}
+
       ${(S.unterschriften || []).length ? `<div class="hint" style="margin-top:12px">
-        ${S.unterschriften.map(u => `<b>${esc(u.name)}</b> – ${esc(u.rolle === 'kontrollberechtigt' ? 'Kontrollberechtigter' : 'Unterschriftsberechtigter')},
-           ${esc(fmtDate(u.gesetzt_am))}${u.firma_id !== S.profil.firma_id ? ' <i>(Partnerfirma)</i>' : ''}`).join('<br>')}</div>
+        ${alleAnlagen.map(a => {
+          const liste = unterschriftenDer(a.id);
+          return `<div style="margin-bottom:8px"><b>${esc(a.name || 'Anlage ohne Name')}</b><br>${
+            liste.length
+              ? liste.map(u => `&nbsp;&nbsp;${esc(u.name)} – ${esc(u.rolle === 'kontrollberechtigt' ? 'Kontrollberechtigter' : 'Unterschriftsberechtigter')},
+                  ${esc(fmtDate(u.gesetzt_am))}${u.firma_id !== S.profil.firma_id ? ' <i>(Partnerfirma)</i>' : ''}`).join('<br>')
+              : '&nbsp;&nbsp;<span style="color:var(--warn)">noch nicht unterschrieben</span>'}</div>`;
+        }).join('')}</div>
+        ${nochOffen ? `<div class="hint" style="margin-top:8px;color:var(--warn)">
+           ⏳ Es fehlt noch: <b>${esc(nochOffen)}</b></div>` : ''}
         ${istErstellerfirma()
           ? '<div class="btnrow"><button class="btn danger" id="btnUnsign">Alle Unterschriften entfernen</button></div>'
           : '<div class="hint">Entfernen kann nur die Firma, welche die Kontrolle angelegt hat.</div>'}`
-        : '<div class="hint">Noch nicht unterschrieben. <b>Eine Unterschrift genügt</b>, um die Kontrolle abzuschliessen.</div>'}
+        : '<div class="hint">Noch nicht unterschrieben.</div>'}
     </div>`;
 
   const kopie = $('#btnKopie');
@@ -500,7 +605,9 @@ async function renderAbschluss() {
   });
 
   $$('#statusChips .chip').forEach(c => c.addEventListener('click', async () => {
-    if (gesperrt) return alert('Die Kontrolle ist unterschrieben – der Status kann nicht mehr geändert werden.');
+    if (gesperrt && !offeneAnlagen.length) {
+      return alert('Alle Anlagen sind unterschrieben – der Status kann nicht mehr geändert werden.');
+    }
     k.status = c.dataset.s;
     k.status_rank = STATUS_STUFEN.indexOf(k.status);
     feldSpeichern('kontrollen', k.id, 'status', k.status);
@@ -526,7 +633,8 @@ async function renderAbschluss() {
     const stunden = Number($('#az_std').value.replace(',', '.'));
     if (!stunden || stunden <= 0) return alert('Bitte die Stunden eintragen (z.B. 1.5).');
     const zeile = await zeileAnlegen('arbeitszeit', {
-      kontrolle_id: k.id, benutzer_id: S.profil.id, kuerzel: S.profil.kuerzel || '',
+      kontrolle_id: k.id, firma_id: S.profil.firma_id,
+      benutzer_id: S.profil.id, kuerzel: S.profil.kuerzel || '',
       datum: $('#az_datum').value || new Date().toISOString().slice(0, 10),
       stunden, taetigkeit: $('#az_txt').value.trim()
     });
@@ -644,7 +752,7 @@ async function renderAbschluss() {
   });
 
   const sign = $('#btnSign');
-  if (sign) sign.addEventListener('click', unterschreiben);
+  if (sign) sign.addEventListener('click', unterschreiben);   // auch bei gesperrter Kontrolle
   const unsign = $('#btnUnsign');
   if (unsign) unsign.addEventListener('click', async () => {
     if (!confirm('Wirklich alle Unterschriften entfernen?\n\nDanach ist die Kontrolle wieder bearbeitbar '
@@ -665,17 +773,31 @@ async function renderAbschluss() {
 
 async function unterschreiben() {
   const rollen = [];
-  if ($('#u_kb').checked) rollen.push('kontrollberechtigt');
-  if ($('#u_ub').checked) rollen.push('unterschriftsberechtigt');
+  const kb = $('#u_kb'), ub = $('#u_ub');
+  if (kb && kb.checked) rollen.push('kontrollberechtigt');
+  if (ub && ub.checked) rollen.push('unterschriftsberechtigt');
   if (!rollen.length) return alert('Bitte mindestens eine Eigenschaft anhaken.');
 
+  const anlageIds = $$('.sign_a').filter(c => c.checked).map(c => c.value);
+  if (!anlageIds.length) return alert('Bitte mindestens eine Anlage anhaken.');
+
   const setzen = async bild => {
-    const zeilen = rollen.map(r => ({
-      kontrolle_id: S.kontrolle.id, dokument: 'kontrollbericht', rolle: r,
-      firma_id: S.profil.firma_id, benutzer_id: S.profil.id,
-      name: S.profil.name || S.profil.kuerzel, bild,
-      pruefsumme: String(S.kontrolle.updated_at || '')
-    }));
+    // Je Anlage und Eigenschaft eine Unterschrift – aber nichts doppelt
+    const zeilen = [];
+    for (const aid of anlageIds) {
+      for (const r of rollen) {
+        const schonDa = (S.unterschriften || [])
+          .some(u => u.benutzer_id === S.profil.id && u.rolle === r && u.anlage_id === aid);
+        if (schonDa) continue;
+        zeilen.push({
+          kontrolle_id: S.kontrolle.id, anlage_id: aid, dokument: 'sina', rolle: r,
+          firma_id: S.profil.firma_id, benutzer_id: S.profil.id,
+          name: S.profil.name || S.profil.kuerzel, bild,
+          pruefsumme: String(S.kontrolle.updated_at || '')
+        });
+      }
+    }
+    if (!zeilen.length) return alert('Für diese Anlagen hast du bereits unterschrieben.');
     const angelegt = [];
     for (const z of zeilen) angelegt.push(await zeileAnlegen('unterschriften', z));
     S.unterschriften = (S.unterschriften || []).concat(angelegt);
@@ -706,6 +828,7 @@ async function unterschreiben() {
 
 async function dokumentErzeugen(art, anlageId) {
   if (!window.jspdf) throw new Error('PDF-Bibliothek nicht geladen');
+  await partnerFirmaLaden();      // für die Rollenzuordnung in den Formularen
   const a = (S.anlagen || []).find(x => x.id === anlageId);
   if (!a) throw new Error('Anlage nicht gefunden');
   const { data: gruppen } = await sb.from('gruppen').select('*').eq('anlage_id', a.id).order('reihenfolge');
@@ -717,8 +840,8 @@ async function dokumentErzeugen(art, anlageId) {
     const { data: sicht } = await sb.from('sichtkontrolle').select('*').eq('anlage_id', a.id);
     const abgehakt = {};
     (sicht || []).forEach(z => { abgehakt[z.punkt] = z.wert; });
-    doc = S.kontrolle.pv ? pvPdf(a, gruppen || [], abgehakt) : mppPdf(a, gruppen || [], abgehakt);
-    bezeichnung = S.kontrolle.pv ? 'Mess- und Prüfprotokoll PV' : 'Mess- und Prüfprotokoll';
+    doc = istPv(a) ? pvPdf(a, gruppen || [], abgehakt) : mppPdf(a, gruppen || [], abgehakt);
+    bezeichnung = istPv(a) ? 'Mess- und Prüfprotokoll PV' : 'Mess- und Prüfprotokoll';
   }
   const name = [S.kontrolle.auftrag_nr, bezeichnung, a.name || 'Anlage',
                 (S.kontrolle.strasse + ' ' + S.kontrolle.hausnr).trim(),
@@ -833,7 +956,7 @@ async function berichtPdf(wahl) {
     ? (f.inst_bewilligung ? 'Inst.-Bew. ' + f.inst_bewilligung : '')
     : (f.kontroll_bewilligung ? 'Kontroll-Bew. ' + f.kontroll_bewilligung : '');
   kopfZeile('Auftraggeber (Eigentümer)',
-    [eig.name, eig.strasse, [eig.plz, eig.ort].filter(Boolean).join(' ')].filter(Boolean).join('\n') || '–',
+    [eig.name, eig.name2, eig.strasse, [eig.plz, eig.ort].filter(Boolean).join(' ')].filter(Boolean).join('\n') || '–',
     'Auftragnehmer',
     [f.name, f.strasse, [f.plz, f.ort].filter(Boolean).join(' '), nummer].filter(Boolean).join('\n') || '–');
   kopfZeile('Ort der Installation',
@@ -1017,14 +1140,15 @@ async function teamLaden() {
 function pvPdf(a, gruppen, abgehakt) {
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({ unit: 'pt', format: 'a4' });
-  const k = S.kontrolle, f = S.firma || {};
+  const k = S.kontrolle;
   const L = 39.6, R = 569.6, X1 = L + 6.8, MID = 304.6, X2 = MID + 8.4;
   const ZH = 12.6, ZL = 11.2, UNTEN = 790;
   const W = pdfWerkzeuge(doc, L, R);
   const pv = (a.sk_angaben || {}).pv || {};      // PV-Angaben hängen an der Anlage
-  const wirInstallateur = k.rolle_ersteller === 'installateur';
+  const zust = zustaendigeFirma(a);
+  const f = zust.firma || {}, bew = zust.bew;
+  const wirInstallateur = zust.rolle === 'installateur';
   const eig = k.eig || {};
-  const bew = wirInstallateur ? (f.inst_bewilligung || '') : (f.kontroll_bewilligung || '');
 
   const tabelle = (y, spalten, zeilen, titel) => {
     if (titel) W.label(X1, y + 10, titel, 7.5);
@@ -1327,7 +1451,10 @@ function mppBloecke(W, doc, M, a, abgehakt, eig, f, bew, wirInstallateur, sichtL
         xs += W.haken(xs, yr, r, gewaehlt === r) + 12;
       });
       let yy = yr + ZH;
-      const zeilen = [['Name', d.name], ['Strasse, Nr.', d.strasse], ['PLZ / Ort', null], ['Tel.-Nr.', d.tel]];
+      // Zweite Namenszeile (z.B. «z.H. Frau Muster») nur, wenn sie erfasst ist
+      const zeilen = [['Name', d.name]];
+      if (d.name2) zeilen.push(['', d.name2]);
+      zeilen.push(['Strasse, Nr.', d.strasse], ['PLZ / Ort', null], ['Tel.-Nr.', d.tel]);
       if (mitBew) zeilen.push(['Bewilligungs-Nr.', d.bew]);
       zeilen.forEach(([lbl, v]) => {
         W.label(x0, yy, lbl);
@@ -1338,7 +1465,7 @@ function mppBloecke(W, doc, M, a, abgehakt, eig, f, bew, wirInstallateur, sichtL
       return yy - ZH + 6;
     };
     const u1 = partei(X1, y, 'Auftraggeber',
-      { name: eig.name, strasse: eig.strasse, plz: eig.plz, ort: eig.ort, tel: eig.tel },
+      { name: eig.name, name2: eig.name2, strasse: eig.strasse, plz: eig.plz, ort: eig.ort, tel: eig.tel },
       ['Eigentümer', 'Verwaltung', 'Stromk.', 'Installateur'], 'Eigentümer');
     const u2 = partei(X2, y, 'Auftragnehmer',
       { name: f.name, strasse: f.strasse, plz: f.plz, ort: f.ort, tel: f.telefon, bew },
@@ -1408,7 +1535,7 @@ function mppBloecke(W, doc, M, a, abgehakt, eig, f, bew, wirInstallateur, sichtL
     let yy = y + 12 + ZH + 1;
     const oben = yy;
 
-    if (k.pv) {
+    if (istPv(a)) {
       // Platzsparend: nur was zutrifft. Ist nichts gewählt, bleibt die Zeile leer.
       const grund = PRUEFGRUENDE.find(grundAn);
       const art = KONTROLLARTEN.find(artAn);
@@ -1471,7 +1598,7 @@ function mppBloecke(W, doc, M, a, abgehakt, eig, f, bew, wirInstallateur, sichtL
     W.label(X1, yy, '(Fabrikat und Typ)');
     const geraeteliste = (k.messgeraete || G.messgeraete || '').split('\n').filter(Boolean);
     geraeteliste.forEach((g, i) => W.wert(X1, yy + (i + 1) * ZL, g));
-    const normen = k.pv
+    const normen = istPv(a)
       ? ['NIV', 'SN EN 62446-1', 'SNR 464022 Blitzschutz', 'NIN SN 411000:2025']
       : ['NIV', 'SN EN 61439', 'Werkvorschriften (TAB)', 'NIN SN 411000:2025'];
     normen.forEach((n, i) => W.haken(X2 + (i % 2) * 150, yy + Math.floor(i / 2) * ZL, n, i === 0 || i === 3));
@@ -1480,11 +1607,11 @@ function mppBloecke(W, doc, M, a, abgehakt, eig, f, bew, wirInstallateur, sichtL
 
   const ergebnis = y => {
     W.titel(X1, y + 11, 'Prüfergebnis', 8.5);
-    if (k.pv) W.label(X1 + 76, y + 11, '(Ziffer 6 der SN EN 62446-1)');
+    if (istPv(a)) W.label(X1 + 76, y + 11, '(Ziffer 6 der SN EN 62446-1)');
     else W.titel(X1 + 148, y + 11, 'Messungen', 8.5);
     const yy = y + 11 + ZL;
     W.haken(X1, yy, 'keine Mängel festgestellt', (S.maengel || []).filter(istMangel).length === 0);
-    W.txt(X1 + 148, yy, k.pv
+    W.txt(X1 + 148, yy, istPv(a)
       ? 'Die Funktionsprüfungen und Messungen sind bei jeder PVA zwingend vorzunehmen.'
       : 'Die Messungen auf den Folgeseiten sind Bestandteil dieses Dokuments.', 7.5);
     return yy + 6;
@@ -1495,7 +1622,8 @@ function mppBloecke(W, doc, M, a, abgehakt, eig, f, bew, wirInstallateur, sichtL
     W.label(X2, y + 12, 'Gegenzeichnung', 9);
     const yy = y + 12 + ZH;
     const heute = dat(new Date());
-    const u = (S.unterschriften || []).find(z => z.rolle === 'kontrollberechtigt');
+    const u = (S.unterschriften || [])
+      .find(z => z.rolle === 'kontrollberechtigt' && (z.anlage_id === a.id || !z.anlage_id));
     W.label(X1, yy, 'Datum'); W.wert(X1 + 34, yy, u ? heute : '');
     W.label(X1, yy + ZH, 'Kontrollberechtigter');
     if (u && u.bild) { try { doc.addImage(u.bild, 'PNG', X1, yy + 18, 100, 32); } catch (e) { /* Bild nicht lesbar */ } }
@@ -1520,7 +1648,7 @@ function messtabelleQuer(doc, k, a, f, gruppen, wirInstallateur, seiteGezaehlt) 
   const Q = pdfWerkzeuge(doc, QL, QR);
   let qy = 25;
   Q.line(QL, qy, QR, qy);
-  Q.titel(QX, qy + 16, (k.pv ? 'Mess- und Prüfprotokoll PV' : 'Mess- und Prüfprotokoll') + ' – Messungen', 11);
+  Q.titel(QX, qy + 16, (istPv(a) ? 'Mess- und Prüfprotokoll PV' : 'Mess- und Prüfprotokoll') + ' – Messungen', 11);
   Q.label(QR - 240, qy + 16, 'Nr.'); Q.wert(QR - 200, qy + 16, k.auftrag_nr);
   let yy = qy + 22;
   Q.line(QL, yy, QR, yy);
@@ -1611,14 +1739,16 @@ function seitenzahlen(doc, seiten, formularname) {
 function mppPdf(a, gruppen, abgehakt) {
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({ unit: 'pt', format: 'a4' });
-  const k = S.kontrolle, f = S.firma || {};
+  const k = S.kontrolle;
   const M = { L: 39.6, R: 569.6, X1: 46.4, MID: 304.6, X2: 313, ZH: 12.6, ZL: 11.2 };
   const { L, R, X1, MID } = M;
   const UNTEN = 790;
   const W = pdfWerkzeuge(doc, L, R);
-  const wirInstallateur = k.rolle_ersteller === 'installateur';
+  // Bei AK/PK gehört die Kontrollfirma ins Feld, sonst die Installationsfirma
+  const zust = zustaendigeFirma(a);
+  const f = zust.firma || {}, bew = zust.bew;
+  const wirInstallateur = zust.rolle === 'installateur';
   const eig = k.eig || {};
-  const bew = wirInstallateur ? (f.inst_bewilligung || '') : (f.kontroll_bewilligung || '');
 
   const B = mppBloecke(W, doc, M, a, abgehakt, eig, f, bew, wirInstallateur, SICHT_STANDARD);
   const bloecke = [B.parteien, B.ort, B.anlage, B.pruefgrund,
@@ -1722,13 +1852,19 @@ function sinaPdf(a, gruppen) {
     kasten: W.kasten, haken: W.haken, trenner: W.trenner, rechts: W.rechts
   };
 
-  // Beteiligte je nach Rolle: unsere Firma steht im passenden Feld
+  // Beide Beteiligten stehen im SiNa in ihrem eigenen Feld – bei einer geteilten
+  // Kontrolle also auch die Partnerfirma.
   const wirInstallateur = k.rolle_ersteller === 'installateur';
-  const uns = { name: f.name || '', strasse: f.strasse || '', plz: f.plz || '', ort: f.ort || '',
-                tel: f.telefon || '', bew: wirInstallateur ? (f.inst_bewilligung || '') : (f.kontroll_bewilligung || '') };
   const leer = { name: '', strasse: '', plz: '', ort: '', tel: '', bew: '' };
-  const inst = wirInstallateur ? uns : leer;
-  const ko = wirInstallateur ? leer : uns;
+  const ausRolle = rolle => {
+    const t = firmaNachRolle(rolle);
+    if (!t) return leer;
+    const d = t.firma || {};
+    return { name: d.name || '', strasse: d.strasse || '', plz: d.plz || '', ort: d.ort || '',
+             tel: d.telefon || '', bew: t.bew || '' };
+  };
+  const inst = ausRolle('installateur');
+  const ko = ausRolle('kontrollorgan');
   const eig = k.eig || {}, verw = k.verwaltung || {};
 
   let y = 25.5;
@@ -1745,7 +1881,10 @@ function sinaPdf(a, gruppen) {
     const tw = doc.getTextWidth(titelTxt);
     label(x0 + tw + 14, y0 + 12, 'Tel.-Nr'); wert(x0 + tw + 46, y0 + 12, d.tel);
     let yy = y0 + 12 + ZH + 1;
-    const zeilen = [['Name', d.name], ['Strasse, Nr.', d.strasse], ['PLZ / Ort', null]];
+    // Zweite Namenszeile (z.B. «z.H. Frau Muster») nur, wenn sie erfasst ist
+    const zeilen = [['Name', d.name]];
+    if (d.name2) zeilen.push(['', d.name2]);
+    zeilen.push(['Strasse, Nr.', d.strasse], ['PLZ / Ort', null]);
     if (mitBew) zeilen.push(['Bewilligungs-Nr.', d.bew]);
     zeilen.forEach(([lbl, v]) => {
       label(x0, yy, lbl);
@@ -1757,8 +1896,8 @@ function sinaPdf(a, gruppen) {
   };
 
   let y0 = y;
-  let u1 = adressblock(X1, y0, 'Eigentümer', { name: eig.name, strasse: eig.strasse, plz: eig.plz, ort: eig.ort, tel: eig.tel });
-  let u2 = adressblock(X2, y0, 'Verwaltung', { name: verw.name, strasse: verw.strasse, plz: verw.plz, ort: verw.ort, tel: verw.tel });
+  let u1 = adressblock(X1, y0, 'Eigentümer', { name: eig.name, name2: eig.name2, strasse: eig.strasse, plz: eig.plz, ort: eig.ort, tel: eig.tel });
+  let u2 = adressblock(X2, y0, 'Verwaltung', { name: verw.name, name2: verw.name2, strasse: verw.strasse, plz: verw.plz, ort: verw.ort, tel: verw.tel });
   y = Math.max(u1, u2);
   line(MID, y0, MID, y);
   trenner(y);
@@ -1891,7 +2030,8 @@ function sinaPdf(a, gruppen) {
                   [X2, 'kontrollberechtigt', wirInstallateur], [X2 + 128, 'unterschriftsberechtigt', wirInstallateur]];
   felder.forEach(([x, rolle, fremd]) => {
     // «fremd» = Feld der anderen Partei: bleibt leer
-    const u = fremd ? null : (S.unterschriften || []).find(z => z.rolle === rolle);
+    const u = fremd ? null : (S.unterschriften || [])
+      .find(z => z.rolle === rolle && (z.anlage_id === a.id || !z.anlage_id));
     label(x, yy, 'Datum'); wert(x + 34, yy, u ? heute : '');
     label(x, yy + ZH, rolle === 'kontrollberechtigt' ? 'Kontrollberechtigter' : 'Unterschriftsberechtigter');
     if (u && u.bild) {
@@ -1961,6 +2101,7 @@ const ablageWeg = (store, key) => ablageTun(store, 'readwrite', s => s.delete(ke
 let sendeLaeuft = false;
 let offeneAuftraege = 0;
 let letzteFehlermeldung = 0;
+const verworfeneZeilen = new Set();   // Zeilen, deren Anlegen endgültig scheiterte
 
 // Zu welcher Kontrolle gehört ein Auftrag? Nötig, damit das Aufräumen nichts
 // wegwirft, was noch nicht auf dem Server ist.
@@ -1974,14 +2115,67 @@ function auftragKontrolle(a) {
   return (S.kontrolle && S.kontrolle.id) || null;
 }
 
+/* Notfall-Ablage: Wenn die Datenbank im Gerät streikt (voller Speicher,
+   privates Surfen), landen die Aufträge im einfachen Browser-Speicher.
+   Der ist klein, rettet aber die Arbeit, bis wieder gesendet werden kann. */
+const NOTFALL = 'niv_notfall';
+
+function notfallLesen() {
+  try { return JSON.parse(localStorage.getItem(NOTFALL) || '[]'); } catch (e) { return []; }
+}
+
+function notfallSchreiben(liste) {
+  try { localStorage.setItem(NOTFALL, JSON.stringify(liste)); return true; }
+  catch (e) { return false; }
+}
+
+function notfallAnhaengen(auftrag) {
+  const liste = notfallLesen();
+  liste.push(auftrag);
+  return notfallSchreiben(liste);
+}
+
+// Bei vollem Speicher: alte Pakete und Fotos wegräumen und Platz schaffen
+async function platzSchaffen() {
+  try {
+    const r = await ablageAufraeumen(7);        // härter als sonst: 7 Tage
+    return !!(r.wegKontrollen || r.wegFotos);
+  } catch (e) { return false; }
+}
+
 async function auftragEinreihen(auftrag) {
   auftrag.zeit = Date.now();
   auftrag.k_id = auftragKontrolle(auftrag);
-  await ablageSchreiben('auftraege', auftrag);
+  let abgelegt = false;
+  try {
+    await ablageSchreiben('auftraege', auftrag);
+    abgelegt = true;
+  } catch (e) {
+    protokollieren('Ablegen fehlgeschlagen', auftrag.tabelle || auftrag.art, e);
+    // Zweiter Versuch, nachdem Platz geschaffen wurde
+    if (await platzSchaffen()) {
+      try { await ablageSchreiben('auftraege', auftrag); abgelegt = true; }
+      catch (e2) { protokollieren('Auch nach Aufräumen fehlgeschlagen', auftrag.tabelle || auftrag.art, e2); }
+    }
+    if (!abgelegt) {
+      // Letzte Rettung: einfacher Browser-Speicher
+      if (notfallAnhaengen(auftrag)) {
+        protokollieren('In die Notfall-Ablage gelegt', auftrag.tabelle || auftrag.art, e);
+        ablageWarnung(e);
+      } else {
+        throw e;                                 // gar nichts geht: Aufrufer behält die Werte
+      }
+    }
+  }
   offeneAuftraege++;
   warteAnzeige();
   // Mit Verbindung ist der Auftrag danach erledigt, ohne kehrt es sofort zurück
-  await warteschlangeSenden();
+  try {
+    await warteschlangeSenden();
+  } catch (e) {
+    protokollieren('Senden abgebrochen', auftrag.tabelle || auftrag.art, e);
+    setSaveState('error', '⚡ noch nicht gesendet – bleibt gespeichert');
+  }
 }
 
 // Eine Kontrolle auch in der lokalen Ablage nachführen (Liste und Paket),
@@ -1998,10 +2192,40 @@ async function lokalKontrolleAendern(id, werte) {
   } catch (e) { console.warn('Lokale Ablage:', e); }
 }
 
+/* Fehlt die Zeile auf dem Server (ihr «insert» ist z.B. nie angekommen), läuft
+   ein «update» ins Leere OHNE Fehler – die Daten wären lautlos weg. Darum wird
+   die Zeile aus der lokalen Ablage nachgereicht. */
+async function zeileNachreichen(a) {
+  try {
+    const p = a.k_id ? await ablageLesen('pakete', a.k_id) : null;
+    if (!p) return false;
+    let zeile = null;
+    if (a.tabelle === 'kontrollen') zeile = p.kontrolle && p.kontrolle.id === a.id ? p.kontrolle : null;
+    else zeile = (p[a.tabelle] || []).find(z => z.id === a.id) || null;
+    if (!zeile) return false;
+    const vollstaendig = Object.assign({}, zeile, a.werte, { id: a.id });
+    const { error } = await sb.from(a.tabelle).insert(vollstaendig);
+    if (error) { protokollieren('Nachreichen fehlgeschlagen', a.tabelle, error); return false; }
+    protokollieren('Fehlende Zeile nachgereicht', a.tabelle + ' ' + a.id, '');
+    return true;
+  } catch (e) {
+    protokollieren('Nachreichen abgebrochen', a.tabelle, e);
+    return false;
+  }
+}
+
 // Führt einen einzelnen Auftrag gegen die Datenbank aus
 async function auftragAusfuehren(a) {
   if (a.art === 'insert') return sb.from(a.tabelle).insert(a.werte);
-  if (a.art === 'update') return sb.from(a.tabelle).update(a.werte).eq('id', a.id);
+  if (a.art === 'update') {
+    // «select» zeigt, ob wirklich eine Zeile getroffen wurde
+    const antwort = await sb.from(a.tabelle).update(a.werte).eq('id', a.id).select('id');
+    if (antwort.error) return antwort;
+    if (antwort.data && antwort.data.length) return antwort;
+    if (await zeileNachreichen(a)) return { error: null };
+    return { error: { message: 'Diese Zeile gibt es auf dem Server nicht (mehr) – '
+      + 'sie liess sich auch nicht nachtragen.' } };
+  }
   if (a.art === 'delete') return sb.from(a.tabelle).delete().eq('id', a.id);
   if (a.art === 'delete_wo') return sb.from(a.tabelle).delete().eq(a.spalte, a.wert);
   if (a.art === 'upsert') return sb.from(a.tabelle).upsert(a.werte, { onConflict: a.konflikt });
@@ -2022,14 +2246,32 @@ function istNetzproblem(fehlerObj) {
 }
 
 async function warteschlangeSenden() {
-  if (sendeLaeuft || !navigator.onLine || !sb) return;
+  if (sendeLaeuft) { speicherAnzeige(); return; }
+  if (!navigator.onLine || !sb) { speicherAnzeige(); return; }
   sendeLaeuft = true;
   const abgelehnt = [];
   try {
-    let liste = await ablageAlle('auftraege');
+    let liste = [];
+    try {
+      liste = await ablageAlle('auftraege');
+    } catch (e) {
+      protokollieren('Warteschlange nicht lesbar', 'auftraege', e);
+      ablageWarnung(e);
+    }
+    // Was in der Notfall-Ablage liegt, geht zuerst raus (es ist älter)
+    const notfall = notfallLesen().map((a, i) => Object.assign({}, a, { nr: i, ausNotfall: true }));
+    liste = notfall.concat(liste.sort((x, y) => x.nr - y.nr));
     offeneAuftraege = liste.length;
     if (liste.length) setSaveState('saving', '● Sendet…');
-    for (const a of liste.sort((x, y) => x.nr - y.nr)) {
+    for (const a of liste) {
+      // Ist der «insert» dieser Zeile endgültig gescheitert, hat ein «update»
+      // darauf keinen Sinn mehr – sonst verschwände es unbemerkt.
+      if (a.id && verworfeneZeilen.has(a.id)) {
+        await auftragEntfernen(a);
+        offeneAuftraege = Math.max(0, offeneAuftraege - 1);
+        abgelehnt.push((a.tabelle || '') + ': gehört zu einer Zeile, die nicht angelegt werden konnte');
+        continue;
+      }
       let antwort;
       try { antwort = await auftragAusfuehren(a); }
       catch (e) { antwort = { error: e }; }
@@ -2040,17 +2282,18 @@ async function warteschlangeSenden() {
         }
         // Echter Fehler (z.B. fehlende Berechtigung): Auftrag entfernen,
         // sonst blockiert er alles Weitere. Gemeldet wird gesammelt am Schluss.
-        await ablageWeg('auftraege', a.nr);
+        await auftragEntfernen(a);
         offeneAuftraege = Math.max(0, offeneAuftraege - 1);
         warteAnzeige();
         abgelehnt.push((a.tabelle || 'Foto') + ': ' + (antwort.error.message || antwort.error));
+        protokollieren('Vom Server abgelehnt', a.art + ' ' + (a.tabelle || 'Foto'), antwort.error);
+        if (a.art === 'insert' && a.werte && a.werte.id) verworfeneZeilen.add(a.werte.id);
         continue;
       }
-      await ablageWeg('auftraege', a.nr);
+      await auftragEntfernen(a);
       offeneAuftraege = Math.max(0, offeneAuftraege - 1);
     }
-    warteAnzeige();
-    if (liste.length && !abgelehnt.length) setSaveState('saved', '✓ Gespeichert');
+    if (!abgelehnt.length) await speicherAnzeige(); else warteAnzeige();
   } finally {
     sendeLaeuft = false;
     if (abgelehnt.length) {
@@ -2066,6 +2309,39 @@ async function warteschlangeSenden() {
         + 'jemand anders sie gelöscht hat.');
     }
   }
+}
+
+// Erledigten Auftrag aus seiner Quelle löschen
+async function auftragEntfernen(a) {
+  if (a.ausNotfall) {
+    const liste = notfallLesen();
+    liste.splice(a.nr, 1);
+    notfallSchreiben(liste);
+    return;
+  }
+  try { await ablageWeg('auftraege', a.nr); }
+  catch (e) { protokollieren('Auftrag nicht entfernbar', a.tabelle || a.art, e); }
+}
+
+/* Die Anzeige oben rechts muss immer den wahren Zustand zeigen – sonst denkt
+   man, es werde noch gespeichert, obwohl längst nichts mehr passiert. */
+async function speicherAnzeige() {
+  // Die Zahl kommt aus der Ablage selbst – ein mitgeführter Zähler kann
+  // auseinanderlaufen, und dann bliebe die Anzeige falsch stehen.
+  let offen = offeneAuftraege;
+  try { offen = (await ablageAlle('auftraege')).length; } catch (e) { /* Ablage streikt */ }
+  const notfall = notfallLesen().length;
+  offeneAuftraege = offen + notfall;
+  if (notfall) {
+    setSaveState('error', '⚠️ nur im Gerät – bitte senden');
+  } else if (!navigator.onLine && offen) {
+    setSaveState('error', '⚡ offline – wird nachgeholt');
+  } else if (offen) {
+    setSaveState('saving', '● Sendet…');
+  } else {
+    setSaveState('saved', '✓ Gespeichert');
+  }
+  warteAnzeige();
 }
 
 function warteAnzeige() {
@@ -2162,9 +2438,9 @@ async function ablageAufraeumen(tage) {
 
 // Was liegt im Gerät? Für die Anzeige in den Optionen
 async function ablageStand() {
-  const pakete = await ablageAlle('pakete');
-  const fotos = (await ablageTun('fotos', 'readonly', s => s.getAllKeys())) || [];
-  const auftraege = await ablageAlle('auftraege');
+  const pakete = await ablageAlle('pakete').catch(() => []);
+  const fotos = (await ablageTun('fotos', 'readonly', s => s.getAllKeys()).catch(() => [])) || [];
+  const auftraege = (await ablageAlle('auftraege').catch(() => [])).concat(notfallLesen());
   let platz = null;
   try {
     if (navigator.storage && navigator.storage.estimate) {
@@ -2186,14 +2462,14 @@ const VORLAGEN = {
              ik_anf_pe: '', ik_end_pe: '', ik_anf_n: '', ik_end_n: '', riso: '', ileck: '',
              rlo: '', rcd_in: '', idn: '', ausl: '', weiteres: '' },
   maengel: { anlage_id: null, typ: 'mangel', reihenfolge: 0, ort: '', text: '', fotos: [] },
-  arbeitszeit: { kuerzel: '', datum: '', stunden: 0, taetigkeit: '' },
+  arbeitszeit: { kuerzel: '', datum: '', stunden: 0, taetigkeit: '', firma_id: null },
   status_verlauf: { status: '', kuerzel: '' },
   unterschriften: { dokument: 'kontrollbericht', rolle: '', name: '', bild: null, pruefsumme: '' }
 };
 
 // Neue Zeile: die Kennung entsteht im Gerät, darum geht es auch ohne Empfang
 async function zeileAnlegen(tabelle, werte) {
-  const zeile = Object.assign({ id: crypto.randomUUID() }, VORLAGEN[tabelle] || {}, werte);
+  const zeile = Object.assign({ id: neueId() }, VORLAGEN[tabelle] || {}, werte);
   await auftragEinreihen({ art: 'insert', tabelle, werte: zeile });
   paketNachfuehren();
   return zeile;
@@ -2285,16 +2561,68 @@ function feldSpeichern(tabelle, id, feld, wert) {
   speicherTimer = setTimeout(sammelSpeichern, 600);
 }
 
-// Nach kurzer Ruhe alles Gesammelte als Auftrag einreihen
+// Nach kurzer Ruhe alles Gesammelte als Auftrag einreihen.
+// WICHTIG: Ein Eintrag verschwindet erst dann aus der Sammlung, wenn er
+// nachweislich in der Ablage liegt – sonst gingen Änderungen verloren, falls
+// das Ablegen scheitert (voller Speicher, gesperrte Datenbank).
 async function sammelSpeichern() {
   if (!speicherWarteschlange.size) return;
-  const offen = new Map(speicherWarteschlange);
-  speicherWarteschlange.clear();
+  const offen = Array.from(speicherWarteschlange.entries());
   for (const [schluessel, werte] of offen) {
     const i = schluessel.indexOf(':');
-    await auftragEinreihen({ art: 'update', tabelle: schluessel.slice(0, i), id: schluessel.slice(i + 1), werte });
+    try {
+      await auftragEinreihen({ art: 'update', tabelle: schluessel.slice(0, i),
+                               id: schluessel.slice(i + 1), werte });
+    } catch (e) {
+      // Nicht abgelegt: Werte bleiben in der Sammlung und werden erneut versucht
+      protokollieren('Änderung konnte nicht abgelegt werden', schluessel, e);
+      setSaveState('error', '⚠️ NICHT gespeichert – bitte App offen lassen');
+      ablageWarnung(e);
+      return;
+    }
+    // Nur diesen Eintrag entfernen – Neueres, das inzwischen dazukam, bleibt
+    const jetzt = speicherWarteschlange.get(schluessel);
+    if (jetzt) {
+      Object.keys(werte).forEach(f => { if (jetzt[f] === werte[f]) delete jetzt[f]; });
+      if (!Object.keys(jetzt).length) speicherWarteschlange.delete(schluessel);
+    }
   }
   paketNachfuehren();
+  await speicherAnzeige();
+}
+
+/* Fehlerprotokoll: die letzten Probleme bleiben abrufbar (Optionen → Speicher im Gerät) */
+const PROTOKOLL_MAX = 30;
+let protokollPuffer = [];
+
+function protokollieren(was, wo, e) {
+  const eintrag = { zeit: new Date().toISOString(), was, wo: String(wo || ''),
+                    fehler: (e && (e.name + ': ' + e.message)) || String(e || '') };
+  console.error('[Elektrokontrolle]', eintrag);
+  protokollPuffer = protokollPuffer.concat(eintrag).slice(-PROTOKOLL_MAX);
+  try { localStorage.setItem('niv_protokoll', JSON.stringify(protokollPuffer)); } catch (x) { /* egal */ }
+  ablageSchreiben('merker', protokollPuffer, 'protokoll').catch(() => { /* Ablage streikt ja gerade */ });
+}
+
+function protokollLesen() {
+  if (protokollPuffer.length) return protokollPuffer;
+  try { protokollPuffer = JSON.parse(localStorage.getItem('niv_protokoll') || '[]'); } catch (e) { protokollPuffer = []; }
+  return protokollPuffer;
+}
+
+// Einmalige, deutliche Warnung, wenn die lokale Ablage nicht mehr mitmacht
+let ablageWarnungGezeigt = false;
+function ablageWarnung(e) {
+  if (ablageWarnungGezeigt) return;
+  ablageWarnungGezeigt = true;
+  const voll = e && /quota|speicher|storage|full/i.test(String(e.name) + String(e.message));
+  alert('⚠️ Achtung: Deine Änderungen konnten im Gerät nicht abgelegt werden.\n\n'
+    + (voll ? 'Der Speicher des Geräts ist voll. '
+            : 'Die lokale Ablage antwortet nicht (das passiert z.B. im privaten Surfen). ')
+    + 'Sie sind NOCH NICHT gespeichert.\n\n'
+    + 'Bitte: die App offen lassen, eine Verbindung herstellen und unter '
+    + '⚙️ Optionen → 💾 Speicher im Gerät auf «Jetzt senden» tippen. '
+    + (voll ? 'Dort kannst du auch aufräumen und Platz schaffen.' : ''));
 }
 
 // Nachholen, sobald wieder Verbindung besteht
@@ -2341,7 +2669,12 @@ function renderKunde() {
   const k = S.kontrolle;
   const eig = k.eig || {};
   const verw = k.verwaltung || {};
-  const meineRolle = k.rolle_ersteller;
+  // Wer sind wir in dieser Kontrolle? Die eingeladene Firma hat eine EIGENE Rolle
+  // (partner_rolle) – sie darf nicht die Rolle der Erstellerfirma verstellen.
+  const binErsteller = k.firma_id === S.profil.firma_id;
+  const rollenFeld = binErsteller ? 'rolle_ersteller' : 'partner_rolle';
+  const meineRolle = k[rollenFeld] || (binErsteller ? 'kontrollorgan' : 'installateur');
+  const andereRolle = binErsteller ? k.partner_rolle : k.rolle_ersteller;
   const bewilligung = meineRolle === 'installateur'
     ? (S.firma && S.firma.inst_bewilligung) : (S.firma && S.firma.kontroll_bewilligung);
 
@@ -2355,11 +2688,11 @@ function renderKunde() {
     </div>
     <div class="hint">Unsere Firma erscheint damit im entsprechenden Feld der Formulare – mit der
       ${meineRolle === 'installateur' ? 'Installationsbewilligung' : 'Kontrollbewilligung'}
-      <b>${esc(bewilligung || '– in den Firmeneinstellungen noch nicht erfasst –')}</b>.</div>
-    <label class="f" style="margin-top:14px">
-      <input type="checkbox" id="k_pv" ${k.pv ? 'checked' : ''} style="width:auto;margin-right:8px">
-      <b>Photovoltaik-Anlage</b> – erzeugt das PV-Protokoll statt des normalen Mess- und Prüfprotokolls
-    </label>
+      <b>${esc(bewilligung || '– in den Firmeneinstellungen noch nicht erfasst –')}</b>.
+      ${binErsteller ? '' : '<br>Das ist <b>eure Rolle</b> als eingeladene Firma – die Erstellerfirma hat ihre eigene.'}</div>
+    ${andereRolle && andereRolle === meineRolle ? `<div class="hint" style="color:var(--warn)">
+      ⚠️ Beide Firmen sind als <b>${meineRolle === 'installateur' ? 'Elektro-Installateur' : 'Unabhängiges Kontrollorgan'}</b>
+      eingetragen. Eine der beiden sollte die andere Rolle übernehmen.</div>` : ''}
   </div>
 
   <div class="card" id="partnerkarte">
@@ -2412,7 +2745,11 @@ function renderKunde() {
     <h3 style="margin-top:0">Eigentümer</h3>
     <div class="btnrow" style="margin-top:0"><button class="btn small" id="k_adrcopy">⤵ Adresse der Anlage übernehmen</button></div>
     <div class="row">
-      <div><label class="f">Name</label><input type="text" id="e_name" value="${esc(eig.name || '')}"></div>
+      <div><label class="f">Name</label><input type="text" id="e_name" value="${esc(eig.name || '')}" placeholder="z.B. Muster AG"></div>
+      <div><label class="f">Zusatz <span class="hint" style="display:inline">– z.B. «z.H. Frau Muster»</span></label>
+        <input type="text" id="e_name2" value="${esc(eig.name2 || '')}"></div>
+    </div>
+    <div class="row">
       <div><label class="f">Telefon</label><input type="text" id="e_tel" inputmode="tel" value="${esc(eig.tel || '')}"></div>
       <div><label class="f">E-Mail</label><input type="text" id="e_mail" inputmode="email" autocapitalize="none" value="${esc(eig.mail || '')}"></div>
     </div>
@@ -2427,7 +2764,10 @@ function renderKunde() {
     <h3 style="margin-top:0">Verwaltung <span class="hint" style="display:inline">– nur falls vorhanden</span></h3>
     <div class="row">
       <div><label class="f">Name</label><input type="text" id="v_name" value="${esc(verw.name || '')}"></div>
-      <div><label class="f">Telefon</label><input type="text" id="v_tel" inputmode="tel" value="${esc(verw.tel || '')}"></div>
+      <div><label class="f">Zusatz <span class="hint" style="display:inline">– z.B. «z.H. Frau Muster»</span></label>
+        <input type="text" id="v_name2" value="${esc(verw.name2 || '')}"></div>
+      <div class="narrow" style="flex:0 0 170px"><label class="f">Telefon</label>
+        <input type="text" id="v_tel" inputmode="tel" value="${esc(verw.tel || '')}"></div>
     </div>
     <div class="row">
       <div style="flex:2"><label class="f">Strasse, Nr.</label><input type="text" id="v_str" value="${esc(verw.strasse || '')}"></div>
@@ -2455,9 +2795,9 @@ function renderKunde() {
     feldSpeichern('kontrollen', k.id, 'zugewiesen', k.zugewiesen);
   });
   // Eigentümer / Verwaltung (JSON-Spalten)
-  [['e_name', 'eig', 'name'], ['e_tel', 'eig', 'tel'], ['e_mail', 'eig', 'mail'],
+  [['e_name', 'eig', 'name'], ['e_name2', 'eig', 'name2'], ['e_tel', 'eig', 'tel'], ['e_mail', 'eig', 'mail'],
    ['e_str', 'eig', 'strasse'], ['e_plz', 'eig', 'plz'], ['e_ort', 'eig', 'ort'],
-   ['v_name', 'verwaltung', 'name'], ['v_tel', 'verwaltung', 'tel'],
+   ['v_name', 'verwaltung', 'name'], ['v_name2', 'verwaltung', 'name2'], ['v_tel', 'verwaltung', 'tel'],
    ['v_str', 'verwaltung', 'strasse'], ['v_plz', 'verwaltung', 'plz'], ['v_ort', 'verwaltung', 'ort']]
     .forEach(([id, spalte, schluessel]) => bindeJsonFeld($('#' + id), k, spalte, schluessel, 'kontrollen'));
 
@@ -2467,11 +2807,10 @@ function renderKunde() {
     renderKunde();
   });
   $$('#rollewahl button').forEach(b => b.addEventListener('click', () => {
-    k.rolle_ersteller = b.classList.contains('r_inst') ? 'installateur' : 'kontrollorgan';
-    feldSpeichern('kontrollen', k.id, 'rolle_ersteller', k.rolle_ersteller);
+    k[rollenFeld] = b.classList.contains('r_inst') ? 'installateur' : 'kontrollorgan';
+    feldSpeichern('kontrollen', k.id, rollenFeld, k[rollenFeld]);
     renderKunde();
   }));
-  bindeFeld($('#k_pv'), k, 'pv', 'kontrollen');
   partnerBereich();
 }
 
@@ -2520,16 +2859,26 @@ async function partnerBereich() {
     return;
   }
 
-  const gesuchteRolle = k.rolle_ersteller === 'installateur' ? 'kontrollorgan' : 'installateur';
+  const vorschlag = k.rolle_ersteller === 'installateur' ? 'kontrollorgan' : 'installateur';
+  const gesuchteRolle = () => {
+    const gewaehlt = document.querySelector('#p_rolle input:checked');
+    return gewaehlt ? gewaehlt.value : vorschlag;
+  };
   const { data: favs } = await sb.from('firma_favoriten')
     .select('partner_firma_id, firmen_suche!inner(*)').eq('firma_id', S.profil.firma_id)
     .then(r => ({ data: (r.data || []).map(x => x.firmen_suche) }))
     .catch(() => ({ data: [] }));
 
-  box.innerHTML = `<div class="hint">Lade die Firma ein, die den anderen Teil übernimmt – bei uns als
-      <b>${esc(k.rolle_ersteller === 'installateur' ? 'Elektro-Installateur' : 'Unabhängiges Kontrollorgan')}</b>
-      wäre das ${gesuchteRolle === 'installateur' ? 'der Installateur' : 'das Kontrollorgan'}.
+  box.innerHTML = `<div class="hint">Lade die Firma ein, die den anderen Teil übernimmt. Unsere Firma ist
+      <b>${esc(k.rolle_ersteller === 'installateur' ? 'Elektro-Installateur' : 'Unabhängiges Kontrollorgan')}</b>.
       Die eingeladene Firma kann die Kontrolle sofort mitbearbeiten.</div>
+    <label class="f">Rolle der eingeladenen Firma</label>
+    <div class="chips" id="p_rolle">
+      <label class="chip"><input type="radio" name="partnerrolle" value="installateur"
+        ${vorschlag === 'installateur' ? 'checked' : ''} style="width:auto;margin-right:6px">Elektro-Installateur</label>
+      <label class="chip"><input type="radio" name="partnerrolle" value="kontrollorgan"
+        ${vorschlag === 'kontrollorgan' ? 'checked' : ''} style="width:auto;margin-right:6px">Unabhängiges Kontrollorgan</label>
+    </div>
     ${(favs && favs.length) ? `<label class="f">Favoriten</label>
       <div class="chips" id="p_favs">${favs.map(f => `<button class="chip" data-fid="${f.id}">★ ${esc(f.name)}</button>`).join('')}</div>` : ''}
     <label class="f">Firma suchen</label>
@@ -2540,11 +2889,14 @@ async function partnerBereich() {
     <div id="p_treffer"></div>`;
 
   const einladen = async (fid, name) => {
-    if (!confirm(`«${name}» als Partnerfirma einladen?\n\nSie kann die Kontrolle danach sehen und mitbearbeiten.`)) return;
+    const rollenText = gesuchteRolle() === 'installateur' ? 'Elektro-Installateur' : 'Unabhängiges Kontrollorgan';
+    if (!confirm(`«${name}» als Partnerfirma einladen?\n\nRolle der eingeladenen Firma: ${rollenText}\n\n`
+      + 'Sie kann die Kontrolle danach sehen und mitbearbeiten.')) return;
+    const rolle = gesuchteRolle();
     const { error } = await sb.from('kontrollen')
-      .update({ partner_firma_id: fid, partner_rolle: gesuchteRolle }).eq('id', k.id);
+      .update({ partner_firma_id: fid, partner_rolle: rolle }).eq('id', k.id);
     if (error) return fehler(error);
-    k.partner_firma_id = fid; k.partner_rolle = gesuchteRolle;
+    k.partner_firma_id = fid; k.partner_rolle = rolle;
     // Als Favorit merken (Fehler hier sind unkritisch)
     await sb.from('firma_favoriten').upsert({ firma_id: S.profil.firma_id, partner_firma_id: fid });
     renderKunde();
@@ -2583,12 +2935,131 @@ async function partnerBereich() {
 
 const STATUS_STUFEN = ['Erfasst', 'Gemessen', 'Geschrieben', 'Abgerechnet', 'Abgeschlossen'];
 
+/* Status je ANLAGE – zusätzlich zum Status der ganzen Kontrolle.
+   «Eröffnet» und «Gemessen» setzt man von Hand; «Abgeschlossen» ergibt sich
+   von selbst, sobald die Anlage unterschrieben ist. Die drei Zustände des
+   Verteilnetzbetreibers vergibt später der VNB (Etappe M) – sie werden hier
+   schon angezeigt, damit nichts nachgerüstet werden muss. */
+const ANLAGE_STATUS = [
+  { wert: 'eroeffnet',       text: 'Eröffnet',        zeichen: '●', hand: true },
+  { wert: 'gemessen',        text: 'Gemessen',        zeichen: '◐', hand: true },
+  { wert: 'abgeschlossen',   text: 'Abgeschlossen',   zeichen: '✓' },
+  { wert: 'beim_vnb',        text: 'Beim VNB',        zeichen: '➤' },
+  { wert: 'genehmigt',       text: 'Von VN genehmigt', zeichen: '★' },
+  { wert: 'zurueckgewiesen', text: 'Zurückgewiesen',  zeichen: '⚠' }
+];
+const VNB_STATUS = ['beim_vnb', 'genehmigt', 'zurueckgewiesen'];
+
+// Der geltende Status einer Anlage. «Abgeschlossen» wird nie gespeichert,
+// sondern aus den Unterschriften abgeleitet – so stimmt die Farbe auch dann
+// noch, wenn eine Unterschrift wieder entfernt wird.
+function anlageStatus(a) {
+  if (!a) return 'eroeffnet';
+  const s = a.status || 'eroeffnet';
+  if (VNB_STATUS.includes(s)) return s;
+  if (anlageUnterzeichnet(a.id)) return 'abgeschlossen';
+  return s === 'abgeschlossen' ? 'gemessen' : s;
+}
+
+const statusInfo = wert => ANLAGE_STATUS.find(s => s.wert === wert) || ANLAGE_STATUS[0];
+
+// Auswahl im Reiter Anlagen. Von Hand setzbar sind nur «Eröffnet» und
+// «Gemessen»; steht die Anlage weiter, erscheint nur noch das Abzeichen.
+function statusWahl(a) {
+  const jetzt = anlageStatus(a);
+  const info = statusInfo(jetzt);
+  if (!info.hand) {
+    return `<div><span class="statusbadge st-${info.wert}">${info.zeichen} ${esc(info.text)}</span></div>
+      <div class="hint">${jetzt === 'abgeschlossen'
+        ? 'Automatisch gesetzt, weil diese Anlage unterschrieben ist. Werden die Unterschriften wieder '
+          + 'entfernt, steht sie erneut auf «Gemessen».'
+        : 'Diesen Status vergibt der Verteilnetzbetreiber.'}</div>`;
+  }
+  return `<div class="btnrow" id="a_status" style="margin:4px 0 0">
+      ${ANLAGE_STATUS.filter(s => s.hand).map(s => `<button class="btn small statuswahl${s.wert === jetzt ? ' st-' + s.wert : ''}" data-st="${s.wert}">${s.zeichen} ${s.text}</button>`).join('')}
+    </div>
+    <div class="hint">Die Farbe der Anlage oben zeigt diesen Status – so siehst du in jedem Reiter sofort,
+      wo schon gemessen ist. <b>«Abgeschlossen» ✓ setzt sich von selbst</b>, sobald die Anlage
+      unterschrieben ist.</div>`;
+}
+
 // Prüfgrund und durchgeführte Kontrolle – im Formular erscheint nur die Auswahl.
 // Beides gehört zur ANLAGE (jede Anlage kann einen eigenen Grund haben); was früher
 // an der Kontrolle erfasst wurde, gilt weiterhin als Rückfall.
 const PRUEFGRUENDE = ['Neuanlage', 'Bestehende Anlage', 'Änderung', 'Erweiterung'];
 const KONTROLLARTEN = ['Schlusskontrolle (NIV Art. 14)', 'Schlusskontrolle (NIV Art. 7/9)',
                        'Abnahmekontrolle (AK)', 'Periodische Kontrolle (PK)'];
+
+/* Welche Firma erscheint als Auftragnehmer? Bei geteilten Kontrollen haben die
+   beiden Firmen verschiedene Rollen: eine ist Installateur, die andere
+   Kontrollorgan. Im MPP gehört bei AK und PK die Kontrollfirma ins Feld,
+   sonst die Installationsfirma. Der SiNa führt beide getrennt auf. */
+S.partnerFirma = null;
+
+async function partnerFirmaLaden() {
+  const k = S.kontrolle;
+  if (!k || !k.partner_firma_id) { S.partnerFirma = null; return null; }
+  if (S.partnerFirma && S.partnerFirma.id === k.partner_firma_id) return S.partnerFirma;
+  if (!navigator.onLine) return S.partnerFirma;
+  const { data } = await sb.from('firmen_suche').select('*').eq('id', k.partner_firma_id).maybeSingle();
+  S.partnerFirma = data || null;
+  return S.partnerFirma;
+}
+
+// Firma in der gesuchten Rolle – eigene oder Partnerfirma. Null, wenn niemand sie hat.
+function firmaNachRolle(rolle) {
+  const k = S.kontrolle;
+  if (!k) return null;
+  const bewilligung = f => (rolle === 'installateur' ? f.inst_bewilligung : f.kontroll_bewilligung) || '';
+  if (k.rolle_ersteller === rolle && S.firma) {
+    return { firma: S.firma, bew: bewilligung(S.firma), rolle, eigene: true };
+  }
+  if (k.partner_firma_id && k.partner_rolle === rolle && S.partnerFirma) {
+    return { firma: S.partnerFirma, bew: bewilligung(S.partnerFirma), rolle, eigene: false };
+  }
+  return null;
+}
+
+const istAkPk = a => /Abnahmekontrolle|Periodische/i.test(anlKontrollart(a).wahl || '');
+
+/* PV oder normales Protokoll wird PRO ANLAGE entschieden – eine Kontrolle kann
+   eine PV-Anlage und einen Gewerberaum mit gewöhnlichem MPP enthalten.
+   Ohne Angabe gilt «Starkstromanlage»; früher erfasste PV-Kontrollen werden
+   beim Laden einmalig übernommen (siehe pvAltdatenUebernehmen). */
+const istPv = a => !!(a && a.sk_angaben && a.sk_angaben.istPv === true);
+
+// Sind an dieser Anlage überhaupt PV-Angaben erfasst? (sonst braucht es keine Rückfrage)
+function pvDatenVorhanden(a) {
+  const sk = (a && a.sk_angaben) || {};
+  const pv = sk.pv || {};
+  if (['module', 'wr', 'straenge', 'strangmessungen', 'batterien'].some(x => (pv[x] || []).length)) return true;
+  if (['projekt', 'beschrieb', 'typ', 'ausrichtung', 'neigung', 'kurz',
+       'inbetriebnahme', 'montage_von', 'montage_bis'].some(x => pv[x])) return true;
+  if (pv.speicher && Object.values(pv.speicher).some(Boolean)) return true;
+  if (pv.funktionspruefung && Object.values(pv.funktionspruefung).some(Boolean)) return true;
+  return !!sk.pronovo;
+}
+
+/* Vor 2.2 hing PV an der ganzen Kontrolle. Damit solche Kontrollen weiterhin
+   das PV-Protokoll liefern, wird die Angabe einmalig auf ihre Anlagen übertragen. */
+async function pvAltdatenUebernehmen() {
+  const k = S.kontrolle;
+  if (!k || !k.pv || !S.anlagen) return;
+  for (const a of S.anlagen) {
+    if (a.sk_angaben && typeof a.sk_angaben.istPv === 'boolean') continue;
+    a.sk_angaben = Object.assign({}, a.sk_angaben, { istPv: true });
+    feldSpeichern('anlagen', a.id, 'sk_angaben', a.sk_angaben);
+  }
+}
+
+// Zuständig für diese Anlage: bei AK/PK das Kontrollorgan, sonst der Installateur.
+// Gibt es dafür keine Firma, bleibt es bei der eigenen.
+function zustaendigeFirma(a) {
+  const gesucht = istAkPk(a) ? 'kontrollorgan' : 'installateur';
+  return firmaNachRolle(gesucht)
+    || firmaNachRolle((S.kontrolle || {}).rolle_ersteller)
+    || { firma: S.firma || {}, bew: '', rolle: (S.kontrolle || {}).rolle_ersteller || 'kontrollorgan', eigene: true };
+}
 
 const anlPruefgrund = a => ((a && a.sk_angaben && a.sk_angaben.pruefgrund)
   || (S.kontrolle && S.kontrolle.pruefgrund) || {});
@@ -2791,7 +3262,7 @@ async function neueKontrolle() {
   // Die Kennung entsteht im Gerät – so lässt sich auch ohne Empfang eine
   // Kontrolle anlegen und sofort ausfüllen.
   const zeile = {
-    id: crypto.randomUUID(),
+    id: neueId(),
     firma_id: S.profil.firma_id,
     rolle_ersteller: eigeneRolle,
     partner_firma_id: null, partner_rolle: null,
@@ -3038,6 +3509,7 @@ S.gruppen = null;      // Gruppen der gewählten Anlage
 async function anlagenLaden() {
   const data = await zeilenHolen('anlagen', 'kontrolle_id', S.kontrolle.id, 'reihenfolge');
   S.anlagen = data;
+  await pvAltdatenUebernehmen();
   paketNachfuehren();
   if (!S.anlagen.some(a => a.id === S.anlageId)) S.anlageId = data.length ? data[0].id : null;
   return data;
@@ -3046,8 +3518,14 @@ async function anlagenLaden() {
 const akt = () => (S.anlagen || []).find(a => a.id === S.anlageId) || null;
 
 function anlagenChips(beimWechsel) {
+  // Die Farbe zeigt den Status der Anlage, das Zeichen davor sagt dasselbe
+  // noch einmal – auf der Baustelle ist Farbe allein schwer zu lesen.
   const html = `<div class="chips">
-    ${(S.anlagen || []).map(a => `<button class="chip ${a.id === S.anlageId ? 'active' : ''}" data-aid="${a.id}">${esc(a.name || 'Anlage ohne Name')}</button>`).join('')}
+    ${(S.anlagen || []).map(a => {
+      const st = statusInfo(anlageStatus(a));
+      return `<button class="chip st-${st.wert} ${a.id === S.anlageId ? 'active' : ''}"
+        data-aid="${a.id}" title="${esc(st.text)}">${st.zeichen} ${esc(a.name || 'Anlage ohne Name')}</button>`;
+    }).join('')}
     <button class="chip add" id="chipAdd">＋ Anlage</button></div>`;
   return {
     html,
@@ -3101,7 +3579,7 @@ async function renderAnlagen() {
 
   // Bei PV-Kontrollen kommt eine zusätzliche Karte mit den Anlagedaten dazu
   const pv = (a.sk_angaben || {}).pv || {};
-  const pvKarte = !k.pv ? '' : `<div class="card">
+  const pvKarte = !istPv(a) ? '' : `<div class="card">
     <h3 style="margin-top:0">☀️ Photovoltaik-Anlage</h3>
     <div class="hint">Diese Angaben erscheinen im PV-Protokoll.</div>
     <div class="row">
@@ -3208,6 +3686,19 @@ async function renderAnlagen() {
       ${wahl('a_erder', 'erder', ['Fundament', 'Tiefenerder', 'Banderder'], 'Erder')}
       ${wahl('a_asbest', 'asbest', ['Asbestfrei', 'Asbestverdacht'], 'Schaltgerätekombination')}
     </div>
+    <label class="f" style="margin-top:14px">Art der Anlage</label>
+    <div class="chips" id="a_art">
+      <label class="chip"><input type="radio" name="anlagenart" value="stark"
+        ${istPv(a) ? '' : 'checked'} style="width:auto;margin-right:8px">Starkstromanlage</label>
+      <label class="chip"><input type="radio" name="anlagenart" value="pv"
+        ${istPv(a) ? 'checked' : ''} style="width:auto;margin-right:8px">PV-Anlage</label>
+    </div>
+    <div class="hint">Bei <b>PV-Anlage</b> entsteht das PV-Protokoll statt des normalen Mess- und
+      Prüfprotokolls, und die Sichtkontrolle zeigt die PV-Prüfliste.</div>
+
+    <label class="f" style="margin-top:14px">Status dieser Anlage</label>
+    ${statusWahl(a)}
+
     <div class="btnrow" style="margin-top:12px"><button class="btn danger small" id="a_del">Anlage löschen</button></div>
   </div>
 
@@ -3232,7 +3723,7 @@ async function renderAnlagen() {
         <input type="date" id="a_kdatum" value="${esc(anlKontrollart(a).datum_sk || anlKontrollart(a).datum || '')}"></div>
       <div class="narrow" style="flex:0 0 165px"><label class="f">Datum Kontrolle AK/PK</label>
         <input type="date" id="a_kdatum2" value="${esc(anlKontrollart(a).datum_akpk || '')}"></div>
-      ${k.pv ? `<div class="narrow" style="flex:0 0 190px"><label class="f">Pronovo Projektnummer</label>
+      ${istPv(a) ? `<div class="narrow" style="flex:0 0 190px"><label class="f">Pronovo Projektnummer</label>
         <input type="text" id="a_pronovo" value="${esc((a.sk_angaben || {}).pronovo || '')}"></div>` : ''}
       <div class="narrow" style="flex:0 0 150px"><label class="f">Inst.-Anzeige Nr.</label>
         <input type="text" id="a_anz_nr" value="${esc(anlKontrollart(a).anzeige_nr || '')}"></div>
@@ -3261,7 +3752,7 @@ async function renderAnlagen() {
 
   v.innerHTML = html;
   chips.wire();
-  if (k.pv) pvVerdrahten(a);
+  if (istPv(a)) pvVerdrahten(a);
   bindeFeld($('#k_hak'), k, 'hak', 'kontrollen');
   bindeFeld($('#a_name'), a, 'name', 'anlagen', () => renderAnlagenChipsNeu());
   bindeFeld($('#a_zaehler'), a, 'zaehler_nr', 'anlagen');
@@ -3273,6 +3764,49 @@ async function renderAnlagen() {
   bindeFeld($('#a_schutz'), a, 'schutzsystem', 'anlagen');
   bindeFeld($('#a_erder'), a, 'erder', 'anlagen');
   bindeFeld($('#a_asbest'), a, 'asbest', 'anlagen');
+  $$('#a_status .statuswahl').forEach(b => b.addEventListener('click', () => {
+    const neu = b.dataset.st;
+    if (neu === anlageStatus(a)) return;
+    a.status = neu;
+    a.status_gesetzt_am = new Date().toISOString();
+    feldSpeichern('anlagen', a.id, 'status', neu);
+    feldSpeichern('anlagen', a.id, 'status_gesetzt_am', a.status_gesetzt_am);
+    $$('#a_status .statuswahl').forEach(x => {
+      x.className = 'btn small statuswahl' + (x.dataset.st === neu ? ' st-' + x.dataset.st : '');
+    });
+    renderAnlagenChipsNeu();
+  }));
+  $$('#a_art input[name="anlagenart"]').forEach(r => r.addEventListener('change', () => {
+    const pvGewaehlt = r.value === 'pv' && r.checked;
+    // Zurück auf Starkstrom: erst nachfragen, denn dabei gehen die PV-Angaben verloren
+    if (!pvGewaehlt && istPv(a) && pvDatenVorhanden(a)) {
+      const weiter = confirm('Diese Anlage wird zur Starkstromanlage.\n\n'
+        + 'Dabei werden die erfassten PV-Angaben (Module, Wechselrichter, Speicher, Stränge, '
+        + 'Strangmessungen, Funktionsprüfung, Pronovo-Nummer) gelöscht.\n\n'
+        + 'OK = wechseln und löschen\nAbbrechen = PV-Anlage bleiben');
+      if (!weiter) {
+        // Auswahl zurücksetzen – es bleibt bei der PV-Anlage
+        const pvFeld = $('#a_art input[value="pv"]');
+        if (pvFeld) pvFeld.checked = true;
+        return;
+      }
+      const rest = Object.assign({}, a.sk_angaben);
+      delete rest.pv;
+      delete rest.pronovo;
+      a.sk_angaben = rest;
+    }
+    a.sk_angaben = Object.assign({}, a.sk_angaben, { istPv: pvGewaehlt });
+    feldSpeichern('anlagen', a.id, 'sk_angaben', a.sk_angaben);
+    // Die Kontrolle merkt sich, ob überhaupt eine PV-Anlage dabei ist – davon
+    // hängt nur noch das Zeichen in der Kontrollliste ab.
+    const irgendeinePv = (S.anlagen || []).some(x => istPv(x));
+    if (!!S.kontrolle.pv !== irgendeinePv) {
+      S.kontrolle.pv = irgendeinePv;
+      feldSpeichern('kontrollen', S.kontrolle.id, 'pv', irgendeinePv);
+    }
+    S.sicht = null;                 // die Prüfliste wechselt
+    renderAnlagen();
+  }));
   $('#a_nutz2').addEventListener('input', e => {
     a.sk_angaben = Object.assign({}, a.sk_angaben, { nutzung2: e.target.value });
     feldSpeichern('anlagen', a.id, 'sk_angaben', a.sk_angaben);
@@ -3338,6 +3872,18 @@ async function renderAnlagen() {
 /* Nennleistung aus den Tabellen rechnen – das Feld wird nicht mehr getippt.
    DC: Summe(Pmpp × Anzahl) durch 1000, weil das Formular kW verlangt.
    AC: Summe(PAC × Anzahl), die Wechselrichter sind schon in kVA angegeben. */
+// Ältere Geräte kennen crypto.randomUUID nicht – dann selbst eine Kennung bilden
+function neueId() {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+  const b = new Uint8Array(16);
+  (typeof crypto !== 'undefined' && crypto.getRandomValues)
+    ? crypto.getRandomValues(b)
+    : b.forEach((_, i) => { b[i] = Math.floor(Math.random() * 256); });
+  b[6] = (b[6] & 0x0f) | 0x40; b[8] = (b[8] & 0x3f) | 0x80;
+  const h = Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
+  return h.slice(0, 8) + '-' + h.slice(8, 12) + '-' + h.slice(12, 16) + '-' + h.slice(16, 20) + '-' + h.slice(20);
+}
+
 function pvZahl(x) {
   const n = parseFloat(String(x == null ? '' : x).replace(',', '.').replace(/[^\d.-]/g, ''));
   return isFinite(n) ? n : 0;
@@ -3495,7 +4041,11 @@ function pvVerdrahten(a) {
 function renderAnlagenChipsNeu() {
   $$('.chip[data-aid]').forEach(c => {
     const a = (S.anlagen || []).find(x => x.id === c.dataset.aid);
-    if (a) c.textContent = a.name || 'Anlage ohne Name';
+    if (!a) return;
+    const st = statusInfo(anlageStatus(a));
+    c.textContent = st.zeichen + ' ' + (a.name || 'Anlage ohne Name');
+    c.title = st.text;
+    c.className = 'chip st-' + st.wert + (a.id === S.anlageId ? ' active' : '');
   });
 }
 
@@ -3811,7 +4361,7 @@ async function renderMaengel() {
 
   let nr = 0;
   v.innerHTML = `<h2>Mängel (${S.maengel.filter(istMangel).length})</h2>
-    <div class="btnrow">
+    <div class="btnrow klebrig">
       <button class="btn primary" id="mAdd">＋ Mangel</button>
       <button class="btn" id="iAdd">＋ Info</button>
       <button class="btn" id="nAdd">＋ Notiz</button>
@@ -3855,7 +4405,17 @@ async function renderMaengel() {
       reihenfolge: S.maengel.length
     });
     S.maengel.push(zeile);
-    renderMaengel();
+    await renderMaengel();
+    // Zum neuen Eintrag springen und das erste Feld bereitstellen –
+    // sonst müsste man nach jedem Anlegen selbst ans Ende scrollen.
+    const karte = document.querySelector(`.mangelcard[data-mid="${zeile.id}"]`);
+    if (karte) {
+      // Ohne Animation – die ist auf dem iPad unzuverlässig, wenn gleichzeitig
+      // neu gezeichnet wird.
+      karte.scrollIntoView({ block: 'center' });
+      const ort = karte.querySelector('.m_ort');
+      if (ort) ort.focus({ preventScroll: true });
+    }
   };
   $('#mAdd').addEventListener('click', () => neu('mangel'));
   $('#iAdd').addEventListener('click', () => neu('info'));
@@ -3905,7 +4465,7 @@ async function renderMaengel() {
       for (const datei of dateien) {
         try {
           const blob = await fotoVerkleinern(datei);
-          const pfad = `${S.kontrolle.id}/${crypto.randomUUID()}.jpg`;
+          const pfad = `${S.kontrolle.id}/${neueId()}.jpg`;
           // Erst ins Gerät – so ist das Bild auch ohne Empfang sofort da
           await ablageSchreiben('fotos', blob, pfad);
           m.fotos = (m.fotos || []).concat(pfad);
@@ -4091,13 +4651,13 @@ async function renderSicht() {
   }
   if (!S.sicht) await sichtLaden();
 
-  const liste = S.kontrolle.pv ? SICHT_PV : SICHT_STANDARD;
+  const liste = istPv(akt()) ? SICHT_PV : SICHT_STANDARD;
   const erledigt = liste.filter(([k]) => k !== 'gruppe' && S.sicht[k] && S.sicht[k].wert === 'ok').length;
   const gesamt = liste.filter(([k]) => k !== 'gruppe').length;
 
   v.innerHTML = `<h2>Sichtkontrolle</h2>${chips.html}
     <div class="hint">Wird <b>pro Anlage</b> erfasst und fliesst ins Mess- und Prüfprotokoll.
-      Angetippt = geprüft und in Ordnung. ${S.kontrolle.pv ? '<b>PV-Anlage:</b> es erscheint die PV-Prüfliste.' : ''}</div>
+      Angetippt = geprüft und in Ordnung. ${istPv(akt()) ? '<b>PV-Anlage:</b> es erscheint die PV-Prüfliste.' : ''}</div>
     <div class="card"><b>${erledigt}</b> von ${gesamt} Punkten abgehakt
       <div class="btnrow" style="margin-top:10px">
         <button class="btn small" id="alleAn">Alle abhaken</button>
@@ -4129,7 +4689,7 @@ async function sichtSetzen(punkt, wert) {
   const zeile = { anlage_id: S.anlageId, kontrolle_id: S.kontrolle.id, punkt, wert };
   await auftragEinreihen({ art: 'upsert', tabelle: 'sichtkontrolle', werte: zeile,
     konflikt: 'anlage_id,punkt' });
-  S.sicht[punkt] = Object.assign({ id: (S.sicht[punkt] || {}).id || crypto.randomUUID() }, zeile);
+  S.sicht[punkt] = Object.assign({ id: (S.sicht[punkt] || {}).id || neueId() }, zeile);
   paketNachfuehren();
 }
 
@@ -4139,7 +4699,7 @@ async function alleSetzen(liste, wert) {
   await auftragEinreihen({ art: 'upsert', tabelle: 'sichtkontrolle', werte: zeilen,
     konflikt: 'anlage_id,punkt' });
   zeilen.forEach(z => {
-    S.sicht[z.punkt] = Object.assign({ id: (S.sicht[z.punkt] || {}).id || crypto.randomUUID() }, z);
+    S.sicht[z.punkt] = Object.assign({ id: (S.sicht[z.punkt] || {}).id || neueId() }, z);
   });
   paketNachfuehren();
 }
@@ -4246,7 +4806,7 @@ async function kontrolleEinspielen(paket) {
   for (const a of (paket.anlagen || []).slice().sort((x, y) => (x.reihenfolge || 0) - (y.reihenfolge || 0))) {
     const zeile = { kontrolle_id: kopf.id };
     ['reihenfolge', 'name', 'zaehler_nr', 'stromkunde', 'stockwerk', 'periode', 'periode2_txt',
-     'periode2', 'schutzsystem', 'erder', 'asbest', 'sk_angaben', 'geprueft_von']
+     'periode2', 'schutzsystem', 'erder', 'asbest', 'sk_angaben', 'geprueft_von', 'status']
       .forEach(f => { if (a[f] !== undefined) zeile[f] = a[f]; });
     const { data, error: e2 } = await sb.from('anlagen').insert(zeile).select().single();
     if (e2) throw e2;
@@ -4272,7 +4832,7 @@ async function kontrolleEinspielen(paket) {
   for (const [pfad, datenUrl] of Object.entries(paket.fotos || {})) {
     try {
       const blob = await (await fetch(datenUrl)).blob();
-      const ziel = `${kopf.id}/${crypto.randomUUID()}.jpg`;
+      const ziel = `${kopf.id}/${neueId()}.jpg`;
       const { error: e5 } = await sb.storage.from('fotos').upload(ziel, blob, { contentType: 'image/jpeg' });
       if (!e5) fotoNeu[pfad] = ziel;
     } catch (e) { /* einzelnes Foto überspringen */ }
@@ -4287,8 +4847,8 @@ async function kontrolleEinspielen(paket) {
   if (maengel.length) { const { error: e6 } = await sb.from('maengel').insert(maengel); if (e6) throw e6; }
 
   const zeiten = (paket.arbeitszeit || []).map(z => ({
-    kontrolle_id: kopf.id, benutzer_id: null, kuerzel: z.kuerzel || '',
-    datum: z.datum, stunden: z.stunden, taetigkeit: z.taetigkeit || ''
+    kontrolle_id: kopf.id, firma_id: S.profil.firma_id, benutzer_id: null,
+    kuerzel: z.kuerzel || '', datum: z.datum, stunden: z.stunden, taetigkeit: z.taetigkeit || ''
   }));
   if (zeiten.length) await sb.from('arbeitszeit').insert(zeiten);
 
@@ -4392,7 +4952,7 @@ async function optGrund() {
       <button class="btn primary" id="g_save">Speichern</button>
       <button class="btn danger small" id="g_reset">Auf Standard zurücksetzen</button>
     </div>
-    <div class="hint" style="margin-top:12px">App-Version: <b>Online 1.7</b></div>
+    <div class="hint" style="margin-top:12px">App-Version: <b>Online 2.8</b></div>
   </div>`;
 
   // Ändern darf nur der Admin (die Datenbank lässt es ohnehin nur ihm zu)
@@ -4461,6 +5021,22 @@ async function optGeraet() {
     <div class="btnrow"><button class="btn primary" id="ge_senden">↻ Jetzt senden</button></div>
   </div>` : ''}
 
+  ${(() => {
+    const eintraege = protokollLesen().slice().reverse();
+    if (!eintraege.length) return '';
+    return `<div class="card">
+      <h3 style="margin-top:0">⚠️ Zuletzt aufgetretene Probleme</h3>
+      <div class="hint">Falls einmal etwas nicht gespeichert wurde, steht hier, was passiert ist.
+        Diese Liste hilft bei der Fehlersuche – sie bleibt auch nach einem Neustart erhalten.</div>
+      <div class="hint" style="margin-top:10px">
+        ${eintraege.slice(0, 12).map(e => `<div class="verlaufzeile"><span>
+          <b>${esc(fmtDate(e.zeit))}</b> – ${esc(e.was)}${e.wo ? ' (' + esc(e.wo) + ')' : ''}<br>
+          <span style="color:var(--warn)">${esc(e.fehler)}</span></span></div>`).join('')}
+      </div>
+      <div class="btnrow"><button class="btn small" id="ge_protokoll_weg">Liste leeren</button></div>
+    </div>`;
+  })()}
+
   <div class="card">
     <h3 style="margin-top:0">Aufräumen</h3>
     <div class="hint">Entfernt Kontrollen, die seit ${ABLAGE_TAGE} Tagen nicht mehr geöffnet wurden,
@@ -4472,6 +5048,14 @@ async function optGeraet() {
     </div>
     <div class="hint" id="ge_stand"></div>
   </div>`;
+
+  const protoWeg = $('#ge_protokoll_weg');
+  if (protoWeg) protoWeg.addEventListener('click', async () => {
+    protokollPuffer = [];
+    try { localStorage.removeItem('niv_protokoll'); } catch (e) { /* egal */ }
+    await ablageSchreiben('merker', [], 'protokoll').catch(() => {});
+    optGeraet();
+  });
 
   const senden = $('#ge_senden');
   if (senden) senden.addEventListener('click', async () => {
@@ -4689,6 +5273,12 @@ async function optTeam() {
              <option value="mitarbeiter" ${b.rolle === 'mitarbeiter' ? 'selected' : ''}>Mitarbeiter</option>
              <option value="admin" ${b.rolle === 'admin' ? 'selected' : ''}>Administrator</option>
            </select>
+           <label class="f" style="margin:0 10px 0 0;white-space:nowrap">
+             <input type="checkbox" class="darf_kb" data-id="${b.id}" ${b.darf_kontrollberechtigt ? 'checked' : ''}
+               style="width:auto;margin-right:6px">kontrollber.</label>
+           <label class="f" style="margin:0 10px 0 0;white-space:nowrap">
+             <input type="checkbox" class="darf_ub" data-id="${b.id}" ${b.darf_unterschriftsberechtigt ? 'checked' : ''}
+               style="width:auto;margin-right:6px">unterschriftsber.</label>
            <button class="btn small" data-act="pwmail" title="Mail zum Zurücksetzen des Passworts senden">🔑 Passwort</button>
            ${b.id === S.profil.id || b.unantastbar ? ''
              : `<button class="btn small" data-act="${b.status === 'gesperrt' ? 'entsperren' : 'sperren'}">${b.status === 'gesperrt' ? 'Entsperren' : 'Sperren'}</button>`}`}
@@ -4699,7 +5289,10 @@ async function optTeam() {
       <div class="hint">Diese Personen haben sich mit eurem Firmen-Code registriert. Prüfe, ob du sie kennst,
         bevor du sie freischaltest.</div></div>${offen.map(zeile).join('')}` : ''}
     <div class="card"><h3 style="margin-top:0">Mitarbeiter (${aktiv.length})</h3>
-      <div class="hint">Administratoren können Firmenangaben ändern, Mitarbeiter freischalten und Rollen vergeben.</div>
+      <div class="hint">Administratoren können Firmenangaben ändern, Mitarbeiter freischalten und Rollen vergeben.
+        Mit den beiden Häkchen legst du fest, <b>was jemand unterschreiben darf</b>: als
+        <b>kontrollberechtigte</b> und/oder als <b>unterschriftsberechtigte</b> Person. Ohne Häkchen
+        kann die Person Kontrollen bearbeiten, aber nicht unterzeichnen.</div>
     </div>
     ${aktiv.map(zeile).join('') || '<div class="empty">Noch keine Mitarbeiter.</div>'}`;
 
@@ -4727,6 +5320,15 @@ async function optTeam() {
     if (error) { b.disabled = false; return fehler(error); }
     optTeam();
   }));
+  const befugnisSetzen = async (el, feld) => {
+    const { error } = await sb.from('benutzer').update({ [feld]: el.checked }).eq('id', el.dataset.id);
+    if (error) { el.checked = !el.checked; return fehler(error); }
+    if (el.dataset.id === S.profil.id) S.profil[feld] = el.checked;
+    setSaveState('saved', '✓ Gespeichert');
+  };
+  $$('#optbody .darf_kb').forEach(c => c.addEventListener('change', () => befugnisSetzen(c, 'darf_kontrollberechtigt')));
+  $$('#optbody .darf_ub').forEach(c => c.addEventListener('change', () => befugnisSetzen(c, 'darf_unterschriftsberechtigt')));
+
   $$('#optbody .rollewahl').forEach(sel => sel.addEventListener('change', async () => {
     const { error } = await sb.from('benutzer').update({ rolle: sel.value }).eq('id', sel.dataset.id);
     if (error) return fehler(error);
@@ -4958,7 +5560,9 @@ async function init() {
   // Was beim letzten Mal nicht mehr gesendet werden konnte, jetzt nachholen –
   // und danach still aufräumen (höchstens einmal am Tag).
   try {
-    offeneAuftraege = (await ablageAlle('auftraege')).length;
+    const ausAblage = await ablageLesen('merker', 'protokoll').catch(() => null);
+    if (ausAblage && ausAblage.length && !protokollPuffer.length) protokollPuffer = ausAblage;
+    offeneAuftraege = (await ablageAlle('auftraege')).length + notfallLesen().length;
     warteAnzeige();
     await warteschlangeSenden();
     const zuletzt = (await ablageLesen('merker', 'aufgeraeumt')) || 0;
