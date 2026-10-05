@@ -79,6 +79,19 @@ function netzAnzeige() {
 window.addEventListener('online', netzAnzeige);
 window.addEventListener('offline', netzAnzeige);
 
+/* SiNa, MPP und CSV holen die Messwerte vom Server – ohne Verbindung gibt es
+   sie nicht. Die Knöpfe werden dann ausgegraut und der Hinweis eingeblendet.
+   Die eigentliche Sicherung ist verbindungNoetig() beim Klick; das hier ist
+   nur die Anzeige, damit man gar nicht erst tippt. */
+function dokKnoepfeStand() {
+  const offline = !navigator.onLine;
+  document.querySelectorAll('.row[data-aid] button[data-dok]').forEach(b => { b.disabled = offline; });
+  const hinweis = document.getElementById('dokhinweis');
+  if (hinweis) hinweis.style.display = offline ? '' : 'none';
+}
+window.addEventListener('online', dokKnoepfeStand);
+window.addEventListener('offline', dokKnoepfeStand);
+
 function fehler(e) {
   const t = (e && e.message) ? e.message : String(e);
   alert('Es hat nicht geklappt:\n\n' + t);
@@ -214,6 +227,13 @@ async function nachAnmeldung() {
     await sb.auth.signOut();
     return;
   }
+  if (p.ausgetreten_am) {
+    authMeldung('Dein Austritt aus der Firma ist auf den <b>' + esc(dat(p.ausgetreten_am))
+      + '</b> eingetragen – darum ist keine Anmeldung mehr möglich. Ist das ein Irrtum, '
+      + 'wende dich an deinen Administrator.', 'fehler');
+    await sb.auth.signOut();
+    return;
+  }
   if (p.status === 'gesperrt') {
     authMeldung('Dein Zugang wurde gesperrt. Bitte wende dich an deinen Administrator.', 'fehler');
     await sb.auth.signOut();
@@ -260,7 +280,7 @@ function render() {
   if (S.view === 'settings') return renderSettings();
   if (S.view === 'kontrollen') return renderKontrollen();
   if (!S.kontrolle) {
-    v.innerHTML = `<div class="empty">Bitte zuerst unter <b>🗂 Kontrollen</b> eine Kontrolle öffnen
+    v.innerHTML = `<div class="empty">Bitte zuerst unter <b>🏠 Start</b> eine Kontrolle öffnen
       oder eine neue anlegen.</div>`;
     return;
   }
@@ -484,6 +504,9 @@ async function renderAbschluss() {
         das PV-Protokoll.
         Die Angaben stammen aus den Reitern Kunde, Anlagen, Sichtkontrolle und Messen sowie aus den
         Firmenangaben (⚙️ Optionen).</div>
+      <div class="robanner" id="dokhinweis" style="display:none;margin-top:10px">⚡ <b>Ohne Verbindung
+        nicht möglich.</b> Die Messwerte werden dafür vom Server geholt – darum entstehen SiNa, MPP und
+        CSV erst wieder mit Empfang. Der <b>Kontrollbericht</b> weiter unten geht auch ohne.</div>
       ${(S.anlagen || []).length ? (S.anlagen || []).map(a => `
         <div class="row" style="align-items:center;margin-top:10px" data-aid="${a.id}">
           <div style="flex:1;font-weight:600">${esc(a.name || 'Anlage ohne Name')}
@@ -498,6 +521,21 @@ async function renderAbschluss() {
         Kopfzeile im CSV einschliessen</label>
       <div class="hint">Das CSV enthält die Messtabelle der Anlage, mit Tabulator getrennt – wie in der
         Sync-Version.</div>
+    </div>
+
+    <div class="card" id="pruefkarte" style="display:none">
+      <h3 style="margin-top:0">🔍 Änderungen prüfen</h3>
+      <div id="pruefliste"></div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0">📁 Abgelegte Dokumente</h3>
+      <div class="hint">Beim Unterschreiben wird jedes Dokument abgelegt – bei einer Partnerfirma
+        <b>bei beiden Firmen</b>. Ändern kann es niemand. <b>Entfernen</b> geht nur aus dem
+        <b>eigenen</b> Archiv (falls nach dem Unterschreiben noch ein Fehler auffiel); eine
+        Partnerfirma behält ihre Fassung. Zu finden ist alles auch im Reiter 🏠 Start unter
+        <b>📁 Archiv</b>.</div>
+      <div id="dokliste"><div class="hint">Wird geladen …</div></div>
     </div>
 
     <div class="card">
@@ -523,9 +561,11 @@ async function renderAbschluss() {
       </div>
       <label class="f" style="margin-top:14px">Kontrolleure im Bericht</label>
       <div class="chips" id="berTeam">
-        ${(S.team || []).map(p => `<label class="chip"><input type="checkbox" class="ber_p" value="${p.id}"
+        ${(S.team || []).filter(p => istAktiv(p) || (k.kontrolleure || []).includes(p.id))
+          .map(p => `<label class="chip"><input type="checkbox" class="ber_p" value="${p.id}"
             ${(k.kontrolleure || []).includes(p.id) ? 'checked' : ''}
-            style="width:auto;margin-right:6px">${esc(p.name || p.kuerzel)}</label>`).join('')
+            style="width:auto;margin-right:6px">${esc(p.name || p.kuerzel)}${
+              p.ausgetreten_am ? ' <span class="hint" style="display:inline">(ausgetreten)</span>' : ''}</label>`).join('')
           || '<span class="hint">Keine freigeschalteten Mitarbeiter gefunden.</span>'}
       </div>
       <div class="hint">Erscheinen im Kopf unter «Kontrolle am / durch» mit Telefon und E-Mail.
@@ -619,6 +659,15 @@ async function renderAbschluss() {
     });
     S.statusVerlauf.push(zeile);
     renderAbschluss();
+    // Beim Abschliessen kommt der Kontrollbericht dazu – er ist das Dokument,
+    // das der Kunde bekommt, und soll in der Fassung von damals erhalten bleiben.
+    if (k.status === 'Abgeschlossen' && navigator.onLine) {
+      setSaveState('saving', '● Bericht wird abgelegt …');
+      try { await dokumentAblegen('kontrollbericht', null, 'abschluss'); }
+      catch (e) { protokollieren('Kontrollbericht nicht abgelegt', k.id, e); }
+      setSaveState('saved', '✓ Gespeichert');
+      renderAbschluss();
+    }
   }));
 
   $$('.sv_del').forEach(b => b.addEventListener('click', async () => {
@@ -659,10 +708,12 @@ async function renderAbschluss() {
     b.textContent = '⏳ …';
     try {
       if (b.dataset.dok === 'csv') {
+        verbindungNoetig('die CSV-Datei');
         const a = (S.anlagen || []).find(x => x.id === aid);
         const { data: gruppen, error } = await sb.from('gruppen').select('*')
-          .eq('anlage_id', aid).order('reihenfolge');
+          .eq('anlage_id', aid).order('reihenfolge').order('id');
         if (error) throw error;
+        if (!gruppen) throw new Error('Die Messwerte konnten nicht geladen werden – es wurde keine Datei erzeugt.');
         const name = [k.auftrag_nr, 'Messwerte', a.name || 'Anlage', (k.strasse + ' ' + k.hausnr).trim()]
           .filter(Boolean).join('_').replace(/[\\/:*?"<>|]+/g, ' ');
         dateiSpeichern(name + '.csv', csvText(gruppen || [], !!S.csvKopf),
@@ -673,7 +724,13 @@ async function renderAbschluss() {
     } catch (e) { fehler(e); }
     b.disabled = false;
     b.textContent = alt;
+    dokKnoepfeStand();          // ohne Verbindung bleibt der Knopf gesperrt
   }));
+  dokKnoepfeStand();
+
+  dokListeZeichnen();
+  pruefkarteZeichnen();
+  aufgabenAufraeumen();       // was sich von selbst erledigt hat, verschwindet
 
   const kontrollDateiname = () => [k.auftrag_nr, 'Kontrolle', (k.strasse + ' ' + k.hausnr).trim(),
     (k.plz + ' ' + k.ort).trim()].filter(Boolean).join('_').replace(/[\\/:*?"<>|]+/g, ' ') + '.ekon';
@@ -802,6 +859,45 @@ async function unterschreiben() {
     for (const z of zeilen) angelegt.push(await zeileAnlegen('unterschriften', z));
     S.unterschriften = (S.unterschriften || []).concat(angelegt);
     renderAbschluss();
+    // Sofort ins Archiv: eine Unterschrift, die später entfernt wird, muss
+    // trotzdem belegt bleiben. SiNa und MPP sind klein – das kostet nichts.
+    setSaveState('saving', '● Wird abgelegt …');
+    const erg = await archivNachUnterschrift(anlageIds, 'unterschrift');
+    setSaveState('saved', '✓ Gespeichert');
+
+    /* Haben wir als FREMDE Firma unterschrieben, muss die andere Seite die
+       Änderungen prüfen. Sie bekommt eine Aufgabe – und auf Wunsch eine Mail,
+       je Firma EINE, auch wenn mehrere Anlagen unterschrieben wurden. */
+    // Nur wenn WIR nicht die Erstellerfirma sind: dann prüft die Erstellerfirma.
+    // Unterschreibt die Erstellerfirma selbst, gibt es bei niemandem etwas zu prüfen.
+    const andere = (S.kontrolle.firma_id && S.kontrolle.firma_id !== S.profil.firma_id)
+      ? [S.kontrolle.firma_id] : [];
+    const namen = anlageIds.map(aid => ((S.anlagen || []).find(x => x.id === aid) || {}).name || 'Anlage');
+    for (const f of andere) {
+      for (let i = 0; i < anlageIds.length; i++) {
+        await aufgabeStellen({ firmaId: f, art: 'aenderungen_pruefen', anlageId: anlageIds[i],
+          text: 'Anlage ' + namen[i] + ' wurde von einer anderen Firma unterschrieben' });
+      }
+      await mailVorschlagen({
+        firmaName: firmaName(f),
+        betreff: 'Unterschrieben – ' + kontrolleTitel(S.kontrolle),
+        text: `Guten Tag\n\n`
+          + `${(S.firma || {}).name || 'Wir'} ${namen.length === 1 ? 'hat die Anlage' : 'hat die Anlagen'} `
+          + `«${namen.join('», «')}» bei ${kontrolleTitel(S.kontrolle)} bearbeitet und unterschrieben.\n\n`
+          + `Bitte prüfen Sie in «Elektrokontrolle online» im Reiter «Abschluss» unter `
+          + `«Änderungen prüfen», was geändert wurde, und nehmen Sie es an oder verwerfen Sie es.\n\n`
+          + `Freundliche Grüsse\n${S.profil.name || S.profil.kuerzel}\n${(S.firma || {}).name || ''}`
+      });
+    }
+    if (erg.offen) {
+      alert(erg.ok
+        ? `${erg.offen} von ${erg.ok + erg.offen} Dokumenten konnten nicht abgelegt werden.\n\n`
+          + 'Im Reiter 📤 Abschluss steht unter «Abgelegte Dokumente» ein Knopf zum Nachholen.'
+        : 'Ohne Verbindung konnten die Dokumente nicht abgelegt werden.\n\n'
+          + 'Die Unterschrift ist gespeichert. Hole das Ablegen im Reiter 📤 Abschluss nach, '
+          + 'sobald du wieder Empfang hast.');
+    }
+    renderAbschluss();
   };
 
   if (S.profil.unterschrift) {
@@ -826,20 +922,46 @@ async function unterschreiben() {
    zwischen den Abteilen, eingeschriebene Werte fett, Ω → «MOhm».
    ============================================================ */
 
-async function dokumentErzeugen(art, anlageId) {
+/* Messwerte und Sichtkontrolle für ein Formular holen. Beides kommt vom Server –
+   darum gibt es SiNa und MPP nur mit Verbindung. Früher entstand ohne Empfang
+   ein vollständig aussehendes PDF mit LEERER Messtabelle, ohne jede Warnung.
+   Lieber kein Dokument als ein falsches. */
+function verbindungNoetig(was) {
+  if (!navigator.onLine) {
+    throw new Error('Ohne Verbindung lässt sich ' + was + ' nicht erzeugen.\n\n'
+      + 'Die Messwerte und die Sichtkontrolle werden dafür vom Server geholt – ohne Empfang '
+      + 'käme ein Dokument mit leerer Messtabelle heraus.\n\n'
+      + 'Der Kontrollbericht funktioniert auch ohne Empfang.');
+  }
+}
+
+async function dokumentErzeugen(art, anlageId, alsDatei) {
   if (!window.jspdf) throw new Error('PDF-Bibliothek nicht geladen');
+  verbindungNoetig(art === 'sina' ? 'der Sicherheitsnachweis' : 'das Mess- und Prüfprotokoll');
   await partnerFirmaLaden();      // für die Rollenzuordnung in den Formularen
+  await anlageFirmenLaden();      // die Firmen DIESER Anlage haben Vorrang
   const a = (S.anlagen || []).find(x => x.id === anlageId);
   if (!a) throw new Error('Anlage nicht gefunden');
-  const { data: gruppen } = await sb.from('gruppen').select('*').eq('anlage_id', a.id).order('reihenfolge');
+  const { data: gruppen, error: gFehler } =
+    await sb.from('gruppen').select('*').eq('anlage_id', a.id).order('reihenfolge').order('id');
+  // Auch mit Verbindung kann die Abfrage scheitern (Funkloch mitten im Vorgang).
+  // Dann wird abgebrochen – sonst entstünde wieder ein leeres Protokoll.
+  if (gFehler || !gruppen) {
+    throw new Error('Die Messwerte konnten nicht geladen werden – es wurde kein Dokument erzeugt.\n\n'
+      + ((gFehler && gFehler.message) || 'Keine Antwort vom Server.'));
+  }
   let doc, bezeichnung;
   if (art === 'sina') {
-    doc = sinaPdf(a, gruppen || []);
+    doc = sinaPdf(a, gruppen);
     bezeichnung = 'Sicherheitsnachweis';
   } else {
-    const { data: sicht } = await sb.from('sichtkontrolle').select('*').eq('anlage_id', a.id);
+    const { data: sicht, error: sFehler } = await sb.from('sichtkontrolle').select('*').eq('anlage_id', a.id);
+    if (sFehler || !sicht) {
+      throw new Error('Die Sichtkontrolle konnte nicht geladen werden – es wurde kein Dokument erzeugt.\n\n'
+        + ((sFehler && sFehler.message) || 'Keine Antwort vom Server.'));
+    }
     const abgehakt = {};
-    (sicht || []).forEach(z => { abgehakt[z.punkt] = z.wert; });
+    sicht.forEach(z => { abgehakt[z.punkt] = z.wert; });
     doc = istPv(a) ? pvPdf(a, gruppen || [], abgehakt) : mppPdf(a, gruppen || [], abgehakt);
     bezeichnung = istPv(a) ? 'Mess- und Prüfprotokoll PV' : 'Mess- und Prüfprotokoll';
   }
@@ -847,8 +969,311 @@ async function dokumentErzeugen(art, anlageId) {
                 (S.kontrolle.strasse + ' ' + S.kontrolle.hausnr).trim(),
                 (S.kontrolle.plz + ' ' + S.kontrolle.ort).trim()]
     .filter(Boolean).join('_').replace(/[\\/:*?"<>|]+/g, ' ');
+  // «alsDatei» liefert das PDF zurück, statt es herunterzuladen – so legt es
+  // das Archiv ab, ohne dass der Browser etwas speichert.
+  if (alsDatei) return { blob: doc.output('blob'), dateiname: name + '.pdf', istPv: istPv(a) };
   doc.save(name + '.pdf');
+  return { dateiname: name + '.pdf' };
 }
+
+/* ============================================================
+   Archiv – unterschriebene Dokumente für immer
+
+   Warum es das braucht: Firmenadressen werden verwiesen statt kopiert, der
+   Stand von damals überlebt also nur hier. Und was einmal unterschrieben war,
+   muss der unterzeichnenden Firma sichtbar bleiben – auch wenn die Unterschrift
+   später entfernt oder die Firma von der Kontrolle genommen wird.
+
+   Der Kniff steckt in `firmen`: das Dokument merkt sich beim Entstehen, WER es
+   lesen darf. Die Leseregel fragt nur dieses Feld – nicht, wer heute an der
+   Kontrolle beteiligt ist.
+   ============================================================ */
+
+// Prüfsumme der Datei. Ohne sichere Herkunft (kein HTTPS) gibt es sie nicht –
+// dann bleibt das Feld leer, das Dokument wird trotzdem abgelegt.
+async function pruefsumme(blob) {
+  try {
+    if (!crypto.subtle) return '';
+    const puffer = await blob.arrayBuffer();
+    const roh = await crypto.subtle.digest('SHA-256', puffer);
+    return Array.from(new Uint8Array(roh)).map(b => b.toString(16).padStart(2, '0')).join('');
+  } catch (e) { return ''; }
+}
+
+// Wer darf das Dokument für immer lesen: alle jetzt beteiligten Firmen –
+// die der Kontrolle und die dieser Anlage
+function beteiligteFirmen(anlageId) {
+  const k = S.kontrolle || {};
+  const liste = [k.firma_id, k.partner_firma_id];
+  if (anlageId) {
+    (S.anlageFirmen || []).forEach(x => { if (x.anlage_id === anlageId) liste.push(x.firma_id); });
+  }
+  return Array.from(new Set(liste.filter(Boolean)));
+}
+
+/* Der Datenstand zum Zeitpunkt des Ablegens. Klein gehalten: die Kontrolle,
+   die betroffene Anlage mit ihren Messzeilen und Sichtprüfpunkten, die
+   Unterschriften und die beteiligten Firmen mit ihrer damaligen Adresse. */
+function schnappschussBauen(anlageId) {
+  const k = S.kontrolle || {};
+  const anlagen = (S.anlagen || []).filter(a => !anlageId || a.id === anlageId);
+  return {
+    zeit: new Date().toISOString(),
+    kontrolle: k,
+    anlagen,
+    gruppen: (S.gruppen || []).filter(g => !anlageId || g.anlage_id === anlageId),
+    sichtkontrolle: Object.values(S.sicht || {}).filter(z => !anlageId || z.anlage_id === anlageId),
+    maengel: (S.maengel || []).filter(m => !anlageId || m.anlage_id === anlageId),
+    unterschriften: (S.unterschriften || []).filter(u => !anlageId || !u.anlage_id || u.anlage_id === anlageId),
+    firmen: [S.firma, S.partnerFirma].filter(Boolean)
+  };
+}
+
+/* Ein Dokument ablegen. Braucht Verbindung (die PDFs holen ihre Messwerte vom
+   Server) – ohne Empfang wird nichts abgelegt und der Reiter Abschluss zeigt
+   den Knopf «Jetzt ablegen». */
+async function dokumentAblegen(art, anlageId, anlass) {
+  const k = S.kontrolle;
+  const firmen = beteiligteFirmen(anlageId);
+  if (!k || !firmen.length) return null;
+
+  let blob, dateiname, dokArt;
+  if (art === 'kontrollbericht') {
+    const anlageIds = (S.anlagen || []).map(a => a.id);
+    const erg = await berichtPdf({ anlageIds, ohneAnlage: true, intern: false, alsDatei: true });
+    blob = erg.blob; dateiname = erg.dateiname + '.pdf'; dokArt = 'kontrollbericht';
+  } else {
+    const erg = await dokumentErzeugen(art, anlageId, true);
+    blob = erg.blob; dateiname = erg.dateiname;
+    dokArt = art === 'sina' ? 'sina' : (erg.istPv ? 'pv_mpp' : 'mpp');
+  }
+  if (!blob) return null;
+
+  // Wie viele Fassungen gibt es schon? Überschrieben wird nie.
+  const { data: bisher } = await sb.from('dokumente').select('version')
+    .eq('kontrolle_id', k.id).eq('art', dokArt)
+    .eq('anlage_id', anlageId || null).order('version', { ascending: false }).limit(1);
+  const version = ((bisher && bisher[0] && bisher[0].version) || 0) + 1;
+
+  const pfad = `${k.id}/${dokArt}_${anlageId || 'alle'}_v${version}_${neueId().slice(0, 8)}.pdf`;
+  const { error: hochFehler } = await sb.storage.from('dokumente')
+    .upload(pfad, blob, { contentType: 'application/pdf' });
+  if (hochFehler) throw hochFehler;
+
+  const zeile = {
+    kontrolle_id: k.id, anlage_id: anlageId || null, firmen,
+    art: dokArt, version, anlass: anlass || 'unterschrift',
+    dateiname, pfad, groesse: blob.size,
+    pruefsumme: await pruefsumme(blob),
+    schnappschuss: schnappschussBauen(anlageId),
+    erzeugt_von: S.profil.id
+  };
+  const { error } = await sb.from('dokumente').insert(zeile);
+  if (error) throw error;
+  S.dokumente = null;
+  return zeile;
+}
+
+/* Nach dem Unterschreiben ablegen: für jede betroffene Anlage der SiNa und das
+   Mess- und Prüfprotokoll. Ohne Verbindung passiert nichts – dann bleibt der
+   Hinweis im Abschluss stehen. */
+async function archivNachUnterschrift(anlageIds, anlass) {
+  if (!navigator.onLine) return { ok: 0, offen: (anlageIds || []).length * 2 };
+  let ok = 0, offen = 0;
+  for (const aid of (anlageIds || [])) {
+    for (const art of ['sina', 'mpp']) {
+      try { await dokumentAblegen(art, aid, anlass || 'unterschrift'); ok++; }
+      catch (e) { offen++; protokollieren('Dokument nicht abgelegt', art + ' ' + aid, e); }
+    }
+  }
+  return { ok, offen };
+}
+
+async function dokumenteLaden(neu) {
+  if (S.dokumente && !neu) return S.dokumente;
+  if (!navigator.onLine || !S.kontrolle) return S.dokumente || [];
+  const { data } = await sb.from('dokumente').select('*')
+    .eq('kontrolle_id', S.kontrolle.id).order('erzeugt_am', { ascending: false });
+  S.dokumente = data || [];
+  return S.dokumente;
+}
+
+// Ein abgelegtes Dokument herunterladen
+async function dokumentHolen(d) {
+  const { data, error } = await sb.storage.from('dokumente').download(d.pfad);
+  if (error) return fehler(error);
+  const url = URL.createObjectURL(data);
+  const a = document.createElement('a');
+  a.href = url; a.download = d.dateiname || 'dokument.pdf';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+/* Die Liste im Reiter Abschluss. Zeigt auch, was noch fehlt: eine
+   unterschriebene Anlage ohne abgelegtes Dokument bekommt einen Knopf zum
+   Nachholen (z.B. weil beim Unterschreiben kein Empfang war). */
+async function dokListeZeichnen() {
+  const box = $('#dokliste');
+  if (!box) return;
+  if (!navigator.onLine) {
+    box.innerHTML = '<div class="hint">⚡ Ohne Verbindung nicht abrufbar.</div>';
+    return;
+  }
+  const liste = await dokumenteLaden(true);
+  const anlName = id => ((S.anlagen || []).find(a => a.id === id) || {}).name || '';
+
+  // Welche unterschriebenen Anlagen haben noch kein Dokument?
+  const fehlend = (S.anlagen || []).filter(a => anlageUnterzeichnet(a.id)
+    && !liste.some(d => d.anlage_id === a.id));
+
+  box.innerHTML = `
+    ${fehlend.length ? `<div class="robanner">⚠️ Für ${fehlend.length === 1 ? 'eine unterschriebene Anlage'
+        : fehlend.length + ' unterschriebene Anlagen'} (${esc(fehlend.map(a => a.name || 'ohne Name').join(', '))})
+        ist noch nichts abgelegt – vermutlich war beim Unterschreiben kein Empfang.
+        <div class="btnrow" style="margin-bottom:0"><button class="btn small" id="dok_nach">📁 Jetzt ablegen</button></div>
+      </div>` : ''}
+    ${liste.length ? liste.map(d => {
+      const auchPartner = (d.firmen || []).some(f => f !== S.profil.firma_id);
+      return `<div class="card kcard" style="margin:6px 0" data-dok="${d.id}">
+        <div class="kinfo">
+          <div class="kt">${esc(DOK_NAMEN[d.art] || d.art)}
+            ${d.anlage_id ? '<span class="statusbadge">' + esc(anlName(d.anlage_id) || 'Anlage') + '</span>' : ''}
+            ${d.version > 1 ? '<span class="statusbadge">Fassung ' + d.version + '</span>' : ''}
+            ${auchPartner ? '<span class="statusbadge sb-me">auch bei der Partnerfirma</span>' : ''}</div>
+          <div class="ks">${esc(fmtDate(d.erzeugt_am))} · ${esc(DOK_ANLASS[d.anlass] || d.anlass)}
+            · ${Math.max(1, Math.round(d.groesse / 1024))} kB
+            ${d.pruefsumme ? ' · Prüfsumme ' + esc(d.pruefsumme.slice(0, 8)) : ''}</div>
+        </div>
+        <button class="btn small" data-act="holen">⬇︎ Öffnen</button>
+        <button class="btn danger small" data-act="weg">🗑 Entfernen</button>
+      </div>`;
+    }).join('')
+      : '<div class="hint">Noch nichts abgelegt. Das geschieht beim Unterschreiben von selbst.</div>'}`;
+
+  $$('#dokliste .kcard button').forEach(b => b.addEventListener('click', async () => {
+    const d = liste.find(x => x.id === b.closest('.kcard').dataset.dok);
+    if (!d) return;
+    if (b.dataset.act === 'holen') return dokumentHolen(d);
+    b.disabled = true;
+    if (await dokumentEntfernen(d)) dokListeZeichnen(); else b.disabled = false;
+  }));
+  const nach = $('#dok_nach');
+  if (nach) nach.addEventListener('click', async () => {
+    nach.disabled = true; nach.textContent = '⏳ …';
+    const erg = await archivNachUnterschrift(fehlend.map(a => a.id), 'vonhand');
+    if (erg.offen) alert(erg.offen + ' Dokument(e) konnten nicht abgelegt werden. '
+      + 'Siehe ⚙️ Optionen → 💾 Speicher im Gerät.');
+    dokListeZeichnen();
+  });
+}
+
+/* Die Karte «Änderungen prüfen». Sie erscheint, sobald eine fremde Firma eine
+   Anlage unterschrieben hat, zu der wir einen eingefrorenen Stand haben. */
+async function pruefkarteZeichnen() {
+  const karte = $('#pruefkarte'), box = $('#pruefliste');
+  if (!karte || !box) return;
+  if (!navigator.onLine) return;
+  const staende = await staendeLaden(true);
+  const anlName = id => ((S.anlagen || []).find(a => a.id === id) || {}).name || 'Anlage';
+
+  // Nur Stände, bei denen die fremde Firma inzwischen unterschrieben hat
+  const dran = staende.filter(s => (S.unterschriften || [])
+    .some(u => u.anlage_id === s.anlage_id && u.firma_id !== S.profil.firma_id));
+  if (!dran.length) { karte.style.display = 'none'; return; }
+  karte.style.display = '';
+  box.innerHTML = '<div class="hint">Wird verglichen …</div>';
+
+  const teile = [];
+  for (const s of dran) {
+    const jetzt = await standDatenSammeln(s.anlage_id);
+    const diff = standVergleichen(s, jetzt);
+    const wer = (S.unterschriften || [])
+      .filter(u => u.anlage_id === s.anlage_id && u.firma_id !== S.profil.firma_id)
+      .map(u => u.name).filter(Boolean).join(', ');
+    teile.push(`<div class="card" style="margin:6px 0" data-stand="${s.id}">
+      <div class="kt">Anlage ${esc(anlName(s.anlage_id))}
+        <span class="statusbadge">${diff.length} Änderung(en)</span></div>
+      <div class="hint">Unterschrieben von <b>${esc(wer || 'der Partnerfirma')}</b> ·
+        Stand festgehalten am ${esc(fmtDate(s.erstellt_am))}</div>
+      ${diff.length ? `<div class="tablewrap" style="max-height:280px;margin-top:8px">
+        <table class="mess"><thead><tr>
+          <th style="width:22%">Bereich</th><th style="width:26%">Zeile</th>
+          <th style="width:16%">Feld</th><th>vorher</th><th>neu</th></tr></thead>
+        <tbody>${diff.map(d => `<tr>
+          <td>${esc(d.bereich)}</td><td class="wide">${esc(d.zeile)}</td>
+          <td>${esc(FELDNAMEN[d.feld] || d.feld)}</td>
+          <td class="wide" style="color:var(--muted)">${esc(d.alt)}</td>
+          <td class="wide"><b>${esc(d.neu)}</b></td></tr>`).join('')}</tbody></table></div>`
+        : '<div class="hint">Es wurde nichts verändert – du kannst einfach annehmen.</div>'}
+      <div class="btnrow">
+        <button class="btn primary" data-act="ja">✓ Änderungen annehmen</button>
+        <button class="btn danger" data-act="nein">↩︎ Verwerfen und Unterschrift entfernen</button>
+      </div>
+    </div>`);
+  }
+  box.innerHTML = `<div class="hint">Eine andere Firma hat an diesen Anlagen gearbeitet und
+      unterschrieben. Prüfe die Änderungen, bevor du selbst unterschreibst.
+      <b>Verwerfen</b> stellt den alten Stand wieder her und entfernt ihre Unterschrift –
+      Änderungen, die du selbst seither gemacht hast, gehen dabei mit verloren.</div>`
+    + teile.join('');
+
+  $$('#pruefliste [data-act]').forEach(b => b.addEventListener('click', async () => {
+    const id = b.closest('[data-stand]').dataset.stand;
+    const s = staende.find(x => x.id === id);
+    if (!s) return;
+    const name = anlName(s.anlage_id);
+    if (b.dataset.act === 'ja') {
+      if (!confirm(`Änderungen an Anlage «${name}» annehmen?\n\n`
+        + 'Der neue Stand gilt damit. Danach kannst du selbst unterschreiben.')) return;
+      b.disabled = true;
+      await standAnnehmen(s);
+    } else {
+      if (!confirm(`Änderungen an Anlage «${name}» verwerfen?\n\n`
+        + '• Der Stand von vorher wird wiederhergestellt\n'
+        + '• Die Unterschrift der anderen Firma wird entfernt und protokolliert\n'
+        + '• Auch eigene Änderungen seit dem Festhalten gehen verloren\n\n'
+        + 'Das lässt sich nicht rückgängig machen.')) return;
+      b.disabled = true;
+      setSaveState('saving', '● Wird zurückgesetzt …');
+      await standVerwerfen(s);
+      setSaveState('saved', '✓ Gespeichert');
+    }
+    renderAbschluss();
+  }));
+}
+
+/* Ein Dokument aus dem EIGENEN Archiv entfernen. Fällt nach dem Unterschreiben
+   noch ein Fehler auf, soll die falsche Fassung weg können. Eine beteiligte
+   Partnerfirma behält ihre – sonst könnte eine Firma den Beleg der anderen
+   vernichten. Die Datei selbst geht erst, wenn niemand mehr darauf zeigt. */
+async function dokumentEntfernen(d) {
+  const mitPartner = (d.firmen || []).filter(f => f !== S.profil.firma_id).length > 0;
+  if (!confirm(`«${DOK_NAMEN[d.art] || d.art}» vom ${dat(d.erzeugt_am)} aus unserem Archiv entfernen?\n\n`
+    + (mitPartner
+      ? 'Die Partnerfirma behält ihre Fassung – die kannst du nicht löschen.\n\n'
+      : 'Danach ist diese Fassung endgültig weg.\n\n')
+    + 'Sinnvoll, wenn du nach dem Unterschreiben noch einen Fehler gefunden hast und '
+    + 'die falsche Fassung nicht im Archiv stehen lassen willst.')) return false;
+
+  const { data, error } = await sb.rpc('dokument_entfernen', { dok_id: d.id });
+  if (error) { fehler(error); return false; }
+  // «ganz» heisst: kein Eintrag zeigt mehr auf die Datei – jetzt darf sie weg
+  if (data === 'ganz') {
+    const { error: e2 } = await sb.storage.from('dokumente').remove([d.pfad]);
+    if (e2) protokollieren('Datei blieb im Speicher', d.pfad, e2);
+  }
+  S.dokumente = null;
+  if (data === 'teilweise') {
+    alert('Aus unserem Archiv entfernt. Die Partnerfirma behält ihre Fassung.');
+  }
+  return true;
+}
+
+const DOK_NAMEN = { sina: 'Sicherheitsnachweis', mpp: 'Mess- und Prüfprotokoll',
+                    pv_mpp: 'Mess- und Prüfprotokoll PV', kontrollbericht: 'Kontrollbericht' };
+const DOK_ANLASS = { unterschrift: 'nach dem Unterschreiben', abschluss: 'beim Abschluss',
+                     maengelbehebung: 'nach der Mängelbehebung', firmenwechsel: 'vor dem Firmenwechsel',
+                     vnb_genehmigt: 'nach der Genehmigung', vonhand: 'von Hand abgelegt' };
 
 /* ============================================================
    PDF: Kontrollbericht – Mängelliste mit Fotos, Informationen und
@@ -914,8 +1339,13 @@ async function berichtPdf(wahl) {
 
   const doc = new jsPDF({ unit: 'mm', format: 'a4' });
   const W = 210, M = 15, CW = W - 2 * M, BOTTOM = 282;
+  // Ab Seite 2 steht oben ein schmaler Seitenkopf – der Inhalt beginnt darunter.
+  // Gezeichnet werden Kopf und Fusszeile erst am Schluss (berichtSeitenRahmen),
+  // weil erst dann die Gesamtzahl der Seiten feststeht.
+  const KOPF_FOLGESEITE = 9;
   let y = M;
-  const platz = h => { if (y + h > BOTTOM) { doc.addPage(); y = M; } };
+  const neueSeite = () => { doc.addPage(); y = M + KOPF_FOLGESEITE; };
+  const platz = h => { if (y + h > BOTTOM) neueSeite(); };
   const wrap = (t, b) => doc.splitTextToSize(String(t || '–'), b);
   const bildArt = d => d.includes('image/png') ? 'PNG' : 'JPEG';
 
@@ -986,7 +1416,7 @@ async function berichtPdf(wahl) {
       if (x > M + 5 && x + w > W - M) {          // passt nicht mehr daneben → neue Reihe
         y += hoechste + 4; x = M + 5; hoechste = 0;
       }
-      if (y + h > BOTTOM) { doc.addPage(); y = M; x = M + 5; hoechste = 0; }
+      if (y + h > BOTTOM) { neueSeite(); x = M + 5; hoechste = 0; }
       doc.addImage(d, bildArt(d), x, y, w, h);
       x += w + 4;
       hoechste = Math.max(hoechste, h);
@@ -1111,6 +1541,14 @@ async function berichtPdf(wahl) {
     doc.setTextColor(0);
   }
 
+  berichtSeitenRahmen(doc, {
+    titel: intern ? 'Kontrollbericht (intern)' : 'Kontrollbericht',
+    auftrag: [k.auftrag_nr, k.auftrag_bez].filter(Boolean).join(' '),
+    adresse: [(k.strasse + ' ' + k.hausnr).trim(), [k.plz, k.ort].filter(Boolean).join(' ')]
+      .filter(Boolean).join(', '),
+    firma: f.name || ''
+  });
+
   const dateiname = berichtDateiname(anlagen, intern);
   if (wahl.alsDatei) return { blob: doc.output('blob'), dateiname };
   doc.save(dateiname + '.pdf');
@@ -1119,15 +1557,21 @@ async function berichtPdf(wahl) {
 
 // Mitarbeiter der eigenen Firma (freigeschaltet) – für die Kontrolleur-Auswahl
 S.team = null;
+/* Geladen werden AUCH ausgetretene Personen. Sonst verlöre ein Kontrollbericht
+   den Namen einer Person, die inzwischen die Firma verlassen hat – in
+   `kontrollen.kontrolleure` stehen nur die Kennungen. Zur Auswahl angeboten
+   werden die Ausgetretenen nicht mehr (siehe renderAbschluss). */
 async function teamLaden() {
   if (S.team) return S.team;
   const { data, error } = await sb.from('benutzer')
-    .select('id,name,kuerzel,telefon,mail,status')
-    .eq('firma_id', S.profil.firma_id).eq('status', 'frei').order('name');
+    .select('id,name,kuerzel,telefon,mail,status,ausgetreten_am')
+    .eq('firma_id', S.profil.firma_id).neq('status', 'offen').order('name');
   if (error) { fehler(error); return []; }
   S.team = data;
   return data;
 }
+
+const istAktiv = p => p && !p.ausgetreten_am && p.status === 'frei';
 
 /* ============================================================
    PDF: Mess- und Prüfprotokoll – Seite 1 Angaben und Prüflisten,
@@ -1148,7 +1592,7 @@ function pvPdf(a, gruppen, abgehakt) {
   const zust = zustaendigeFirma(a);
   const f = zust.firma || {}, bew = zust.bew;
   const wirInstallateur = zust.rolle === 'installateur';
-  const eig = k.eig || {};
+  const eig = anlEig(a);      // Eigentümer der Anlage, sonst der der Kontrolle
 
   const tabelle = (y, spalten, zeilen, titel) => {
     if (titel) W.label(X1, y + 10, titel, 7.5);
@@ -1348,7 +1792,7 @@ function pvPdf(a, gruppen, abgehakt) {
     standY => { y = standY; seitenwechsel(); return y; });
   W.line(L, oben, L, y); W.line(R, oben, R, y);
 
-  seitenzahlen(doc, seiten, 'M+P PV 2020');
+  seitenzahlen(doc, doc.getNumberOfPages(), 'M+P PV 2020', dokKennung(a));
   return doc;
 }
 
@@ -1465,7 +1909,7 @@ function mppBloecke(W, doc, M, a, abgehakt, eig, f, bew, wirInstallateur, sichtL
       return yy - ZH + 6;
     };
     const u1 = partei(X1, y, 'Auftraggeber',
-      { name: eig.name, name2: eig.name2, strasse: eig.strasse, plz: eig.plz, ort: eig.ort, tel: eig.tel },
+      { name: eig.name, name2: eig.name2, strasse: eig.strasse, plz: eig.plz, ort: eig.ort, tel: adrTel(eig) },
       ['Eigentümer', 'Verwaltung', 'Stromk.', 'Installateur'], 'Eigentümer');
     const u2 = partei(X2, y, 'Auftragnehmer',
       { name: f.name, strasse: f.strasse, plz: f.plz, ort: f.ort, tel: f.telefon, bew },
@@ -1523,7 +1967,10 @@ function mppBloecke(W, doc, M, a, abgehakt, eig, f, bew, wirInstallateur, sichtL
   const ALT_ART = { 'Schlusskontrolle (NIV Art. 14)': 'sk', 'Schlusskontrolle (NIV Art. 7/9)': 'sk79',
                     'Abnahmekontrolle (AK)': 'ak', 'Periodische Kontrolle (PK)': 'pk' };
   const grundAn = name => P.wahl === name || !!P[ALT_GRUND[name]];
-  const artAn = name => KA.wahl === name || !!KA[ALT_ART[name]];
+  // Angekreuzt wird alles, was zutrifft: die eigene Wahl, der Platz der
+  // Installationsfirma, der des Kontrollorgans und die alten Einzel-Flags.
+  const artAn = name => KA.wahl === name || KA.art_inst === name || KA.art_ko === name
+    || !!KA[ALT_ART[name]];
   const datumSk = KA.datum_sk || KA.datum || '';
   const datumAkpk = KA.datum_akpk || '';
 
@@ -1538,10 +1985,10 @@ function mppBloecke(W, doc, M, a, abgehakt, eig, f, bew, wirInstallateur, sichtL
     if (istPv(a)) {
       // Platzsparend: nur was zutrifft. Ist nichts gewählt, bleibt die Zeile leer.
       const grund = PRUEFGRUENDE.find(grundAn);
-      const art = KONTROLLARTEN.find(artAn);
+      const arten = KONTROLLARTEN.filter(artAn);   // bei zwei Firmen sind es zwei
       if (grund) W.haken(X1, yy, grund, true);
-      if (art) W.haken(CK, yy, art, true);
-      yy += ZH;
+      arten.forEach((art, i) => W.haken(CK, yy + i * ZH, art, true));
+      yy += Math.max(1, arten.length) * ZH;
       if (P.freitext) { W.kasten(X1, yy - 5.6, true); W.txt(X1 + 10, yy, P.freitext, 7.5); yy += ZH; }
       if (datumSk || datumAkpk) {
         let x = X1;
@@ -1723,16 +2170,76 @@ function messtabelleQuer(doc, k, a, f, gruppen, wirInstallateur, seiteGezaehlt) 
 }
 
 /* Seitenzahlen und Fusszeilen – erst am Schluss, wenn die Gesamtzahl feststeht */
-function seitenzahlen(doc, seiten, formularname) {
+/* Text auf eine Breite kürzen – lieber «…» als in den Nachbartext hineinschreiben */
+function pdfKuerzen(doc, text, breite) {
+  let t = String(text || '');
+  if (doc.getTextWidth(t) <= breite) return t;
+  while (t.length > 1 && doc.getTextWidth(t + '…') > breite) t = t.slice(0, -1);
+  return t.trimEnd() + '…';
+}
+
+/* Woran man ein loses Blatt eines Formulars erkennt: Auftrag, Adresse, Anlage.
+   Formulare gibt es pro Anlage – darum gehört die Anlage hier dazu. */
+function dokKennung(a) {
+  const k = S.kontrolle || {};
+  return [k.auftrag_nr,
+          [(k.strasse + ' ' + k.hausnr).trim(), [k.plz, k.ort].filter(Boolean).join(' ')].filter(Boolean).join(', '),
+          a && a.name ? 'Anlage ' + a.name : '']
+    .filter(Boolean).join(' · ');
+}
+
+/* Seitenrand der Formulare (SiNa, MPP, PV-Protokoll), Masseinheit Punkt.
+   Oben links die Kennung, oben rechts «Seite x von y» – auf JEDER Seite, damit
+   ausgedruckte Blätter sich nicht vermischen (gewünscht am 05.10.2026).
+   Beides sitzt im freien Rand über dem Formularrahmen. Unten wie bisher
+   Formularname und «Elektrokontrolle online». */
+function seitenzahlen(doc, seiten, formularname, kennung) {
   for (let i = 1; i <= seiten; i++) {
     doc.setPage(i);
     const quer = doc.internal.pageSize.getWidth() > doc.internal.pageSize.getHeight();
+    const links = quer ? 28 : 39.6, rechts = quer ? 813.89 : 569.6;
+    const oben = quer ? 18 : 18;          // Rahmen beginnt bei 25 – darüber ist frei
     doc.setFont('helvetica', 'normal'); doc.setFontSize(6.5); doc.setTextColor(100);
-    doc.text(formularname, quer ? 28 : 39.6, quer ? 575 : 820);
-    doc.text('Elektrokontrolle online', (quer ? 813.89 : 569.6) - 110, quer ? 575 : 820);
+    doc.text(formularname, links, quer ? 575 : 820);
+    doc.text('Elektrokontrolle online', rechts - 110, quer ? 575 : 820);
     doc.setFontSize(7.5);
-    doc.text('Seite ' + i + ' von ' + seiten, (quer ? 813.89 : 569.6) - 60, quer ? 40 : 20);
+    const seite = 'Seite ' + i + ' von ' + seiten;
+    doc.text(seite, rechts, oben, { align: 'right' });
+    if (kennung) {
+      const platzKennung = rechts - links - doc.getTextWidth(seite) - 20;
+      doc.text(pdfKuerzen(doc, kennung, platzKennung), links, oben);
+    }
     doc.setTextColor(0);
+  }
+}
+
+/* Seitenrahmen des Kontrollberichts, Masseinheit mm.
+   Ab Seite 2 ein schmaler Kopf (Bericht · Auftrag | Adresse), auf JEDER Seite
+   eine Fusszeile (Firma | Seite x von y). Beim internen Bericht steht «intern»
+   im Kopf jeder Folgeseite – damit nie eine Seite mit Notizen in den
+   Kundenstapel gerät. */
+function berichtSeitenRahmen(doc, { titel, auftrag, adresse, firma }) {
+  const W = 210, M = 15, n = doc.getNumberOfPages();
+  for (let i = 1; i <= n; i++) {
+    doc.setPage(i);
+    doc.setFont('helvetica', 'normal'); doc.setTextColor(90); doc.setDrawColor(150);
+    doc.setLineWidth(0.2);
+    if (i > 1) {
+      doc.setFontSize(8.5);
+      const rechtsTxt = pdfKuerzen(doc, adresse, 80);
+      const linksBreite = W - 2 * M - doc.getTextWidth(rechtsTxt) - 6;
+      doc.setFont('helvetica', 'bold');
+      const linksTxt = pdfKuerzen(doc, titel + (auftrag ? ' · ' + auftrag : ''), linksBreite);
+      doc.text(linksTxt, M, M + 3);
+      doc.setFont('helvetica', 'normal');
+      doc.text(rechtsTxt, W - M, M + 3, { align: 'right' });
+      doc.line(M, M + 5, W - M, M + 5);
+    }
+    doc.setFontSize(8);
+    doc.line(M, 287, W - M, 287);
+    doc.text(pdfKuerzen(doc, firma, 120), M, 291);
+    doc.text('Seite ' + i + ' von ' + n, W - M, 291, { align: 'right' });
+    doc.setTextColor(0); doc.setDrawColor(0);
   }
 }
 
@@ -1748,7 +2255,7 @@ function mppPdf(a, gruppen, abgehakt) {
   const zust = zustaendigeFirma(a);
   const f = zust.firma || {}, bew = zust.bew;
   const wirInstallateur = zust.rolle === 'installateur';
-  const eig = k.eig || {};
+  const eig = anlEig(a);      // Eigentümer der Anlage, sonst der der Kontrolle
 
   const B = mppBloecke(W, doc, M, a, abgehakt, eig, f, bew, wirInstallateur, SICHT_STANDARD);
   const bloecke = [B.parteien, B.ort, B.anlage, B.pruefgrund,
@@ -1784,7 +2291,7 @@ function mppPdf(a, gruppen, abgehakt) {
   W.line(L, oben, L, y); W.line(R, oben, R, y);
 
   messtabelleQuer(doc, k, a, f, gruppen, wirInstallateur, () => ++seiten);
-  seitenzahlen(doc, seiten, 'M+P 2018 V2');
+  seitenzahlen(doc, doc.getNumberOfPages(), 'M+P 2018 V2', dokKennung(a));
   return doc;
 }
 
@@ -1857,7 +2364,8 @@ function sinaPdf(a, gruppen) {
   const wirInstallateur = k.rolle_ersteller === 'installateur';
   const leer = { name: '', strasse: '', plz: '', ort: '', tel: '', bew: '' };
   const ausRolle = rolle => {
-    const t = firmaNachRolle(rolle);
+    // Zuerst die Firma DIESER Anlage – sie kann von der Kontrolle abweichen
+    const t = anlageFirma(a, rolle) || firmaNachRolle(rolle);
     if (!t) return leer;
     const d = t.firma || {};
     return { name: d.name || '', strasse: d.strasse || '', plz: d.plz || '', ort: d.ort || '',
@@ -1865,7 +2373,7 @@ function sinaPdf(a, gruppen) {
   };
   const inst = ausRolle('installateur');
   const ko = ausRolle('kontrollorgan');
-  const eig = k.eig || {}, verw = k.verwaltung || {};
+  const eig = anlEig(a), verw = k.verwaltung || {};   // Eigentümer je Anlage
 
   let y = 25.5;
   line(L, y, R, y);
@@ -1896,8 +2404,8 @@ function sinaPdf(a, gruppen) {
   };
 
   let y0 = y;
-  let u1 = adressblock(X1, y0, 'Eigentümer', { name: eig.name, name2: eig.name2, strasse: eig.strasse, plz: eig.plz, ort: eig.ort, tel: eig.tel });
-  let u2 = adressblock(X2, y0, 'Verwaltung', { name: verw.name, name2: verw.name2, strasse: verw.strasse, plz: verw.plz, ort: verw.ort, tel: verw.tel });
+  let u1 = adressblock(X1, y0, 'Eigentümer', { name: eig.name, name2: eig.name2, strasse: eig.strasse, plz: eig.plz, ort: eig.ort, tel: adrTel(eig) });
+  let u2 = adressblock(X2, y0, 'Verwaltung', { name: verw.name, name2: verw.name2, strasse: verw.strasse, plz: verw.plz, ort: verw.ort, tel: adrTel(verw) });
   y = Math.max(u1, u2);
   line(MID, y0, MID, y);
   trenner(y);
@@ -1946,7 +2454,7 @@ function sinaPdf(a, gruppen) {
   const grundAn = name => P.wahl === name
     || !!P[{ 'Neuanlage': 'neuanlage', 'Bestehende Anlage': 'bestehend',
              'Änderung': 'aenderung', 'Erweiterung': 'erweiterung' }[name]];
-  const artAn = name => KA.wahl === name
+  const artAn = name => KA.wahl === name || KA.art_inst === name || KA.art_ko === name
     || !!KA[{ 'Schlusskontrolle (NIV Art. 14)': 'sk', 'Schlusskontrolle (NIV Art. 7/9)': 'sk79',
               'Abnahmekontrolle (AK)': 'ak', 'Periodische Kontrolle (PK)': 'pk' }[name]];
   const CK = X1 + 118;
@@ -1957,10 +2465,11 @@ function sinaPdf(a, gruppen) {
   const umfangOben = yy;
   // Nur das Gewählte – das spart die leeren Kästchenzeilen
   const grundGewaehlt = PRUEFGRUENDE.find(grundAn);
-  const artGewaehlt = KONTROLLARTEN.find(artAn);
+  const artenGewaehlt = KONTROLLARTEN.filter(artAn);   // bei zwei Firmen sind es zwei
   if (grundGewaehlt) haken(X1, yy, grundGewaehlt, true);
-  if (artGewaehlt) haken(CK, yy, artGewaehlt, true);
-  if (grundGewaehlt || artGewaehlt || P.freitext) yy += ZH;
+  artenGewaehlt.forEach((art, i) => haken(CK, yy + i * ZH, art, true));
+  const artZeilen = Math.max(grundGewaehlt ? 1 : 0, artenGewaehlt.length, P.freitext ? 1 : 0);
+  if (artZeilen) yy += artZeilen * ZH;
   if (P.freitext) { kasten(X1, yy - 5.6, true); txt(X1 + 10, yy, P.freitext, 7.5); yy += ZH; }
   const datumSk = KA.datum_sk || KA.datum || '';
   const datumAkpk = KA.datum_akpk || '';
@@ -2046,8 +2555,8 @@ function sinaPdf(a, gruppen) {
   trenner(y);
   line(L, 25.5, L, y); line(R, 25.5, R, y);
 
-  txt(L, 820, 'SiNa 2018 V2', 6.5, false, true);
-  txt(R - 110, 820, 'Elektrokontrolle online', 6.5, false, true);
+  // Fusszeile, Seitenzahl und Kennung wie bei den anderen Formularen
+  seitenzahlen(doc, doc.getNumberOfPages(), 'SiNa 2018 V2', dokKennung(a));
   return doc;
 }
 
@@ -2484,16 +2993,31 @@ async function zeileLoeschen(tabelle, id) {
 async function zeilenHolen(tabelle, spalte, wert, sortierFeld) {
   if (navigator.onLine) {
     let q = sb.from(tabelle).select('*').eq(spalte, wert);
-    if (sortierFeld) q = q.order(sortierFeld);
+    // Zweites Merkmal: legen zwei Leute gleichzeitig etwas an, bekommen beide
+    // Zeilen dieselbe Reihenfolge-Nummer. Ohne festen Zweitschlüssel zeigte
+    // dann jedes Gerät eine andere Reihenfolge – und der Kontrollbericht
+    // nummerierte denselben Mangel verschieden.
+    if (sortierFeld) q = q.order(sortierFeld).order('id');
     const { data, error } = await q;
     if (!error) return data || [];
     if (!istNetzproblem(error)) { fehler(error); return []; }
   }
   const p = S.paket || (S.kontrolle ? await ablageLesen('pakete', S.kontrolle.id) : null);
   const zeilen = (p && p[tabelle]) ? p[tabelle].filter(z => z[spalte] === wert) : [];
-  return sortierFeld
-    ? zeilen.slice().sort((a, b) => (a[sortierFeld] || 0) - (b[sortierFeld] || 0))
-    : zeilen.slice();
+  return sortierFeld ? zeilen.slice().sort(nachFeldUndId(sortierFeld)) : zeilen.slice();
+}
+
+// Sortierung wie auf dem Server: erst das Zahlenfeld, bei Gleichstand die Kennung
+function nachFeldUndId(feld) {
+  return (a, b) => ((a[feld] || 0) - (b[feld] || 0))
+    || String(a.id || '').localeCompare(String(b.id || ''));
+}
+
+// Nächste freie Reihenfolge-Nummer: der höchste vorhandene Wert plus eins.
+// Die Länge der Liste taugt dafür nicht – nach gelöschten Einträgen gäbe sie
+// eine Nummer zurück, die es schon gibt.
+function naechsteNr(liste) {
+  return (liste || []).reduce((m, z) => Math.max(m, (Number(z.reihenfolge) || 0) + 1), 0);
 }
 
 // Die ganze Kontrolle in einem Rutsch holen und ablegen
@@ -2540,6 +3064,9 @@ function ausPaketFuellen(p) {
   S.unterschriften = (p.unterschriften || []).slice();
   S.gruppen = null;              // hängen an der gewählten Anlage
   S.sicht = null;
+  S.anlageFirmen = null;         // gehören zur Kontrolle, neu laden
+  S.dokumente = null;
+  S.staende = null;
   if (!S.anlagen.some(a => a.id === S.anlageId)) S.anlageId = S.anlagen.length ? S.anlagen[0].id : null;
   S.paket = p;
 }
@@ -2568,8 +3095,16 @@ function feldSpeichern(tabelle, id, feld, wert) {
 async function sammelSpeichern() {
   if (!speicherWarteschlange.size) return;
   const offen = Array.from(speicherWarteschlange.entries());
-  for (const [schluessel, werte] of offen) {
+  for (const [schluessel, sammlung] of offen) {
     const i = schluessel.indexOf(':');
+    /* ECHTE Kopie – nicht die Sammlung selbst!
+       Während des Sendens tippt man weiter, und `feldSpeichern` schreibt in
+       genau dieses Objekt. Wurde es unverändert weitergereicht, hielt die
+       App unten die inzwischen dazugekommenen Werte für versendet und
+       löschte sie aus der Sammlung: sie standen dann zwar noch auf dem
+       Bildschirm, kamen aber nie beim Server an und waren beim nächsten
+       Laden weg. (Gemeldet und nachgestellt am 10.09.2026.) */
+    const werte = Object.assign({}, sammlung);
     try {
       await auftragEinreihen({ art: 'update', tabelle: schluessel.slice(0, i),
                                id: schluessel.slice(i + 1), werte });
@@ -2580,7 +3115,11 @@ async function sammelSpeichern() {
       ablageWarnung(e);
       return;
     }
-    // Nur diesen Eintrag entfernen – Neueres, das inzwischen dazukam, bleibt
+    /* Nur entfernen, was wirklich rausgegangen ist. Steht im Feld inzwischen
+       ein anderer Wert, bleibt er liegen und geht beim nächsten Mal raus.
+       Der Vergleich mit === genügt: Text ist Text, und verschachtelte Angaben
+       (Eigentümer, sk_angaben) werden beim Ändern immer neu erzeugt, sind
+       also ein anderes Objekt. */
     const jetzt = speicherWarteschlange.get(schluessel);
     if (jetzt) {
       Object.keys(werte).forEach(f => { if (jetzt[f] === werte[f]) delete jetzt[f]; });
@@ -2662,6 +3201,321 @@ function bindeJsonFeld(el, obj, spalte, schluessel, tabelle) {
 }
 
 /* ============================================================
+   Adressbuch – Nachschlagewerk, nicht Wahrheit
+
+   Eigentümer und Verwaltungen haben kein Konto und pflegen ihre Adresse
+   nicht selbst. Damit man sie nicht jedes Mal neu abtippt, wird jede
+   erfasste Adresse hier abgelegt. Verbindlich ist trotzdem immer die KOPIE
+   in der Anlage bzw. in der Kontrolle – sonst würde eine spätere Korrektur
+   rückwirkend ein bereits unterschriebenes Dokument verändern.
+   (Firmen stehen bewusst NICHT im Adressbuch – die kommen aus dem System.)
+   ============================================================ */
+
+const ADR_FELDER = ['name', 'name2', 'strasse', 'plz', 'ort', 'mail', 'telefon'];
+
+const adrLeer = a => !a || !ADR_FELDER.some(f => String(a[f] || '').trim());
+
+// Erkennungsmerkmal wie in der Datenbank (Nachtrag 9)
+const adrSchluessel = a => [a && a.name, a && a.name2, a && a.strasse, a && a.plz]
+  .map(x => String(x || '').trim().toLowerCase()).join('|');
+
+// Anzeige: Name, Zusatz, Strasse, PLZ Ort – leere Teile fallen weg
+const adrEinzeilig = a => [a && a.name, a && a.name2, a && a.strasse,
+  [a && a.plz, a && a.ort].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+
+/* Das Telefon hiess im Reiter Kunde von Anfang an «tel», im Adressbuch
+   «telefon». Massgebend ist «telefon»; «tel» wird beim Einlesen übernommen
+   und beim Ausgeben als Rückfall gelesen, damit früher erfasste Kontrollen
+   ihre Nummer behalten. */
+const adrTel = a => String((a && (a.telefon || a.tel)) || '').trim();
+
+function adrSauber(a) {
+  const raus = {};
+  ADR_FELDER.forEach(f => { raus[f] = String((a && a[f]) || '').trim(); });
+  raus.telefon = adrTel(a);
+  return raus;
+}
+
+S.adressbuch = null;
+
+async function adressbuchLaden(neu) {
+  if (S.adressbuch && !neu) return S.adressbuch;
+  if (!navigator.onLine || !S.profil) return S.adressbuch || [];
+  const { data, error } = await sb.from('adressen').select('*')
+    .eq('firma_id', S.profil.firma_id)
+    .order('zuletzt_verwendet', { ascending: false }).limit(500);
+  if (error) return S.adressbuch || [];
+  S.adressbuch = data || [];
+  return S.adressbuch;
+}
+
+/* Adresse ins Adressbuch übernehmen. Reine Bequemlichkeit: schlägt es fehl
+   (kein Empfang, Tabelle noch nicht angelegt), passiert nichts Schlimmes –
+   die Adresse selbst liegt längst in der Anlage. Darum ohne Fehlermeldung. */
+async function adressbuchMerken(adresse, typ) {
+  if (adrLeer(adresse) || !navigator.onLine || !S.profil) return;
+  try {
+    const werte = adrSauber(adresse);
+    const { data } = await sb.from('adressen').select('id')
+      .eq('firma_id', S.profil.firma_id).eq('schluessel', adrSchluessel(adresse)).maybeSingle();
+    if (data) {
+      await sb.from('adressen').update(Object.assign({ zuletzt_verwendet: new Date().toISOString() }, werte))
+        .eq('id', data.id);
+    } else {
+      await sb.from('adressen').insert(Object.assign({ firma_id: S.profil.firma_id, typ: typ || 'eigentuemer' }, werte));
+    }
+    S.adressbuch = null;
+  } catch (e) { /* Adressbuch ist Beiwerk */ }
+}
+
+/* ---- Eigentümer der Anlage ---- */
+
+// Eigentümer dieser Anlage; ist keiner erfasst, gilt der der Kontrolle.
+// (Mit Etappe C1 wird daraus der Eigentümer des Gebäudes.)
+const anlEig = a => ((a && a.sk_angaben && a.sk_angaben.eig)
+  || (S.kontrolle && S.kontrolle.eig) || {});
+const eigenerEig = a => !!(a && a.sk_angaben && !adrLeer(a.sk_angaben.eig));
+
+/* Was schon zu diesem Objekt bekannt ist: der Eigentümer der Kontrolle und
+   die Eigentümer der übrigen Anlagen. Ab Etappe C1 kommen die Eigentümer
+   aller Kontrollen desselben Gebäudes dazu. */
+function eigVorschlaege(ausserAnlageId) {
+  const liste = [];
+  const dazu = (adr, woher) => {
+    if (adrLeer(adr)) return;
+    if (liste.some(x => adrSchluessel(x.adr) === adrSchluessel(adr))) return;
+    liste.push({ adr, woher });
+  };
+  dazu((S.kontrolle || {}).eig, 'Kontrolle');
+  (S.anlagen || []).forEach(x => {
+    if (x.id === ausserAnlageId) return;
+    dazu((x.sk_angaben || {}).eig, 'Anlage ' + (x.name || 'ohne Name'));
+  });
+  return liste;
+}
+
+// Eigentümer der Anlage setzen; nachher fragen, ob er auch Stromkunde wird
+async function eigSetzen(a, adresse) {
+  const sauber = adrSauber(adresse);
+  a.sk_angaben = Object.assign({}, a.sk_angaben, { eig: sauber });
+  feldSpeichern('anlagen', a.id, 'sk_angaben', a.sk_angaben);
+  adressbuchMerken(sauber, 'eigentuemer');
+  if (sauber.name && a.stromkunde !== sauber.name
+      && confirm(`«${sauber.name}» auch als Stromkunde dieser Anlage eintragen?`)) {
+    a.stromkunde = sauber.name;
+    feldSpeichern('anlagen', a.id, 'stromkunde', a.stromkunde);
+  }
+  renderAnlagen();
+}
+
+/* Der Dialog: oben was schon bekannt ist, darunter das Adressbuch,
+   ganz unten die Felder zum Erfassen oder Ändern. */
+/* Ein Dialog für ALLE Adressen – Eigentümer der Anlage, Eigentümer und
+   Verwaltung im Reiter Kunde. Vorher gab es hier einen Dialog und dort sieben
+   einzelne Felder; dieselbe Sache auf zwei Arten zu bedienen ist unnötig, und
+   im Reiter Kunde fehlte dadurch das Adressbuch – ausgerechnet dort, wo eine
+   Verwaltung am ehesten schon einmal erfasst wurde.
+
+   wahl = {
+     titel, typ, jetzt (aktuelle Adresse), vorschlaege [{adr, woher}],
+     hinweis, zusatzKnoepfe [{text, adresse()}], entfernen (Funktion|null),
+     speichern (Funktion)
+   } */
+async function adressDialog(wahl) {
+  const ov = document.createElement('div');
+  ov.className = 'overlay eigbox';
+  ov.innerHTML = `<div class="dialog" style="max-width:620px">
+    <h3>${esc(wahl.titel)}</h3>
+    <div id="eig_inhalt"><div class="hint">Wird geladen …</div></div>
+  </div>`;
+  document.body.appendChild(ov);
+  ov.addEventListener('click', e => { if (e.target === ov) ov.remove(); });
+
+  const buch = (await adressbuchLaden()).filter(x => !wahl.typ || x.typ === wahl.typ || !x.typ);
+  const vorschlaege = wahl.vorschlaege || [];
+  const jetzt = adrSauber(wahl.jetzt);
+  const zusatz = (wahl.zusatzKnoepfe || []).filter(z => z && z.adresse);
+
+  const karte = (adr, woher, quelle) => `<div class="card kcard eigwahl" data-q="${quelle}"
+      data-s="${esc(adrSchluessel(adr))}" style="margin:6px 0;cursor:pointer">
+      <div class="kinfo">
+        <div class="kt">${esc(adr.name || '(ohne Namen)')}</div>
+        <div class="ks">${esc([adr.name2, adr.strasse, [adr.plz, adr.ort].filter(Boolean).join(' ')]
+          .filter(Boolean).join(' · ') || '—')}${woher ? ' · <b>' + esc(woher) + '</b>' : ''}</div>
+      </div>
+      <button class="btn primary small">Übernehmen</button>
+    </div>`;
+
+  $('#eig_inhalt').innerHTML = `
+    ${vorschlaege.length ? `<label class="f" style="margin-top:0">Schon zu diesem Objekt erfasst</label>
+      ${vorschlaege.map((v, i) => karte(v.adr, v.woher, 'objekt' + i)).join('')}` : ''}
+
+    <label class="f">Aus dem Adressbuch</label>
+    <div class="row" style="align-items:flex-end">
+      <div><input type="text" id="eig_suche" placeholder="Name, Strasse oder Ort"></div>
+    </div>
+    <div id="eig_treffer">${buch.length ? '' : `<div class="hint">${navigator.onLine
+      ? 'Das Adressbuch ist noch leer – es füllt sich von selbst, sobald du Eigentümer erfasst.'
+      : 'Ohne Verbindung steht das Adressbuch nicht zur Verfügung.'}</div>`}</div>
+
+    <label class="f" style="margin-top:16px">Erfassen oder ändern</label>
+    <div class="row">
+      <div><input type="text" id="eig_name" value="${esc(jetzt.name)}" placeholder="Name / Firma"></div>
+      <div><input type="text" id="eig_name2" value="${esc(jetzt.name2)}" placeholder="Zusatz, z.B. z.H. Frau Muster"></div>
+    </div>
+    <div class="row">
+      <div style="flex:2"><input type="text" id="eig_str" value="${esc(jetzt.strasse)}" placeholder="Strasse, Nr."></div>
+      <div class="narrow" style="flex:0 0 110px"><input type="text" id="eig_plz" inputmode="numeric" value="${esc(jetzt.plz)}" placeholder="PLZ"></div>
+      <div><input type="text" id="eig_ort" value="${esc(jetzt.ort)}" placeholder="Ort"></div>
+    </div>
+    <div class="row">
+      <div><input type="text" id="eig_mail" inputmode="email" autocapitalize="none" value="${esc(jetzt.mail)}" placeholder="E-Mail"></div>
+      <div><input type="text" id="eig_tel" inputmode="tel" value="${esc(jetzt.telefon)}" placeholder="Telefon"></div>
+    </div>
+    <div class="btnrow" style="margin-top:14px">
+      <button class="btn primary" id="eig_ok">Übernehmen</button>
+      ${zusatz.map((z, i) => `<button class="btn" data-zusatz="${i}">${esc(z.text)}</button>`).join('')}
+      ${wahl.entfernen ? `<button class="btn" id="eig_weg">${esc(wahl.entfernen.text)}</button>` : ''}
+      <button class="btn" id="eig_ab">Abbrechen</button>
+    </div>
+    <div class="hint">${wahl.hinweis || ''} Die Angaben werden als <b>Kopie</b> gespeichert – eine
+      spätere Änderung im Adressbuch verändert unterschriebene Dokumente also nie.</div>`;
+
+  const felder = { eig_name: 'name', eig_name2: 'name2', eig_str: 'strasse',
+                   eig_plz: 'plz', eig_ort: 'ort', eig_mail: 'mail', eig_tel: 'telefon' };
+  const ausFeldern = () => {
+    const adr = {};
+    Object.entries(felder).forEach(([id, f]) => { adr[f] = $('#' + id).value; });
+    return adr;
+  };
+  const inFelder = adr => Object.entries(felder).forEach(([id, f]) => { $('#' + id).value = adr[f] || ''; });
+
+  const treffer = () => {
+    const t = $('#eig_suche').value.trim().toLowerCase();
+    const liste = (buch || []).filter(x => !t
+      || [x.name, x.name2, x.strasse, x.ort].some(w => String(w || '').toLowerCase().includes(t)))
+      .slice(0, 8);
+    $('#eig_treffer').innerHTML = liste.length
+      ? liste.map(x => karte(x, '', 'buch')).join('')
+      : '<div class="hint">Kein Eintrag passt.</div>';
+    verdrahten();
+  };
+  const verdrahten = () => {
+    $$('.eigwahl').forEach(el => el.addEventListener('click', () => {
+      const s = el.dataset.s;
+      const quelle = el.dataset.q === 'buch' ? (buch || []) : vorschlaege.map(v => v.adr);
+      const adr = quelle.find(x => adrSchluessel(x) === s);
+      if (adr) inFelder(adrSauber(adr));
+    }));
+  };
+  verdrahten();
+  if (buch.length) treffer();
+  $('#eig_suche').addEventListener('input', treffer);
+
+  $('#eig_ab').addEventListener('click', () => ov.remove());
+  $('#eig_ok').addEventListener('click', async () => {
+    const adr = ausFeldern();
+    if (adrLeer(adr)) return alert('Bitte mindestens den Namen erfassen.');
+    ov.remove();
+    await wahl.speichern(adrSauber(adr));
+  });
+  $$('#eig_inhalt [data-zusatz]').forEach(b => b.addEventListener('click', () => {
+    const z = zusatz[Number(b.dataset.zusatz)];
+    const adr = z.adresse();
+    if (!adr) return;
+    // «ergaenzen» liefert nur einen Teil (z.B. bloss die Strasse) – dann bleibt
+    // stehen, was schon im Formular steht. Sonst wird ganz ersetzt.
+    inFelder(adrSauber(z.ergaenzen ? Object.assign({}, ausFeldern(), adr) : adr));
+  }));
+  const wegKnopf = $('#eig_weg');
+  if (wegKnopf) wegKnopf.addEventListener('click', () => {
+    if (wahl.entfernen.frage && !confirm(wahl.entfernen.frage)) return;
+    ov.remove();
+    wahl.entfernen.tun();
+  });
+}
+
+/* ---- Die drei Verwendungen ---- */
+
+// Eigentümer einer Anlage
+async function eigentuemerDialog(a) {
+  // «Vorherige Anlage» heisst die nächste DAVOR mit eigenem Eintrag – man
+  // arbeitet die Anlagen der Reihe nach ab. Gibt es davor keine, wird nach
+  // hinten gesucht, damit der Knopf trotzdem etwas Sinnvolles liefert.
+  const alle = S.anlagen || [];
+  const hier = alle.findIndex(x => x.id === a.id);
+  const mitEintrag = x => x.id !== a.id && !adrLeer((x.sk_angaben || {}).eig);
+  const vorherige = alle.slice(0, Math.max(0, hier)).reverse().find(mitEintrag)
+    || alle.slice(hier + 1).find(mitEintrag) || null;
+
+  await adressDialog({
+    titel: 'Eigentümer der Anlage ' + (a.name || ''),
+    typ: 'eigentuemer',
+    jetzt: anlEig(a),
+    vorschlaege: eigVorschlaege(a.id),
+    hinweis: 'Ohne eigenen Eintrag gilt der Eigentümer aus dem Reiter 👤 Kunde.',
+    zusatzKnoepfe: [vorherige && { text: '⟳ Aus «' + (vorherige.name || 'Anlage') + '»',
+                                   adresse: () => (vorherige.sk_angaben || {}).eig }],
+    entfernen: eigenerEig(a) ? {
+      text: 'Eigenen Eintrag entfernen',
+      frage: 'Eigenen Eintrag dieser Anlage entfernen?\n\nDanach gilt wieder der Eigentümer '
+             + 'aus dem Reiter Kunde.',
+      tun: () => {
+        const rest = Object.assign({}, a.sk_angaben);
+        delete rest.eig;
+        a.sk_angaben = rest;
+        feldSpeichern('anlagen', a.id, 'sk_angaben', a.sk_angaben);
+        renderAnlagen();
+      }
+    } : null,
+    speichern: adr => eigSetzen(a, adr)
+  });
+}
+
+// Eigentümer oder Verwaltung im Reiter Kunde – gilt für das ganze Objekt
+async function kundeAdressDialog(spalte) {
+  const k = S.kontrolle;
+  const istEig = spalte === 'eig';
+  const ortDerAnlage = () => ({ strasse: (k.strasse + ' ' + k.hausnr).trim(), plz: k.plz, ort: k.ort });
+  // Als Vorschlag dient, was an den Anlagen schon steht (bzw. die jeweils
+  // andere Adresse) – gerade bei kleinen Objekten ist das oft dieselbe Person.
+  const vorschlaege = [];
+  const dazu = (adr, woher) => {
+    if (adrLeer(adr) || vorschlaege.some(v => adrSchluessel(v.adr) === adrSchluessel(adr))) return;
+    vorschlaege.push({ adr, woher });
+  };
+  if (istEig) (S.anlagen || []).forEach(x => dazu((x.sk_angaben || {}).eig, 'Anlage ' + (x.name || '')));
+  dazu(istEig ? k.verwaltung : k.eig, istEig ? 'Verwaltung' : 'Eigentümer');
+
+  await adressDialog({
+    titel: istEig ? 'Eigentümer' : 'Verwaltung',
+    typ: istEig ? 'eigentuemer' : 'verwaltung',
+    jetzt: k[spalte] || {},
+    vorschlaege,
+    hinweis: istEig
+      ? 'Gilt für das ganze Objekt. Gehört eine einzelne Anlage jemand anderem, lässt sich das im '
+        + 'Reiter 🔌 Anlagen pro Anlage erfassen.'
+      : 'Nur falls vorhanden.',
+    zusatzKnoepfe: [{ text: '⤵ Adresse der Installation', adresse: ortDerAnlage, ergaenzen: true }],
+    entfernen: adrLeer(k[spalte]) ? null : {
+      text: 'Eintrag leeren',
+      frage: 'Diesen Eintrag wirklich leeren?',
+      tun: () => {
+        k[spalte] = {};
+        feldSpeichern('kontrollen', k.id, spalte, k[spalte]);
+        renderKunde();
+      }
+    },
+    speichern: adr => {
+      k[spalte] = adr;
+      feldSpeichern('kontrollen', k.id, spalte, adr);
+      adressbuchMerken(adr, istEig ? 'eigentuemer' : 'verwaltung');
+      renderKunde();
+    }
+  });
+}
+
+/* ============================================================
    Reiter: Kunde / Auftrag
    ============================================================ */
 
@@ -2677,19 +3531,24 @@ function renderKunde() {
   const andereRolle = binErsteller ? k.partner_rolle : k.rolle_ersteller;
   const bewilligung = meineRolle === 'installateur'
     ? (S.firma && S.firma.inst_bewilligung) : (S.firma && S.firma.kontroll_bewilligung);
+  // Unsere Kontrollart: der Platz unserer Rolle, sonst die alte Einzelwahl
+  const KAk = k.kontrollart || {};
+  const meineArt = KAk[meineRolle === 'installateur' ? 'art_inst' : 'art_ko'] || KAk.wahl || '';
 
   $('#view').innerHTML = `<h2>Kunde &amp; Auftrag</h2>
 
   <div class="card">
-    <h3 style="margin-top:0">Unsere Rolle bei dieser Kontrolle</h3>
-    <div class="typtoggle" id="rollewahl">
-      <button class="r_inst ${meineRolle === 'installateur' ? 'on' : ''}">Elektro-Installateur</button>
-      <button class="r_kontr ${meineRolle === 'kontrollorgan' ? 'on' : ''}">Unabhängiges Kontrollorgan</button>
+    <h3 style="margin-top:0">Was wir hier machen</h3>
+    <div class="eiganzeige">${esc(meineArt || '– noch nicht festgelegt –')}
+      <span class="hint" style="display:inline">→ ${esc(rolleName(meineRolle))}</span></div>
+    <div class="btnrow" style="margin-bottom:0">
+      <button class="btn small" id="k_art">✎ Ändern</button>
     </div>
-    <div class="hint">Unsere Firma erscheint damit im entsprechenden Feld der Formulare – mit der
+    <div class="hint">Aus der Kontrollart ergibt sich unsere Rolle: Unsere Firma erscheint im Feld
+      <b>${esc(rolleName(meineRolle))}</b> der Formulare, mit der
       ${meineRolle === 'installateur' ? 'Installationsbewilligung' : 'Kontrollbewilligung'}
       <b>${esc(bewilligung || '– in den Firmeneinstellungen noch nicht erfasst –')}</b>.
-      ${binErsteller ? '' : '<br>Das ist <b>eure Rolle</b> als eingeladene Firma – die Erstellerfirma hat ihre eigene.'}</div>
+      ${binErsteller ? '' : '<br>Das gilt für <b>uns</b> als eingeladene Firma – die Erstellerfirma hat ihre eigene Aufgabe.'}</div>
     ${andereRolle && andereRolle === meineRolle ? `<div class="hint" style="color:var(--warn)">
       ⚠️ Beide Firmen sind als <b>${meineRolle === 'installateur' ? 'Elektro-Installateur' : 'Unabhängiges Kontrollorgan'}</b>
       eingetragen. Eine der beiden sollte die andere Rolle übernehmen.</div>` : ''}
@@ -2742,37 +3601,27 @@ function renderKunde() {
   </div>
 
   <div class="card">
-    <h3 style="margin-top:0">Eigentümer</h3>
-    <div class="btnrow" style="margin-top:0"><button class="btn small" id="k_adrcopy">⤵ Adresse der Anlage übernehmen</button></div>
-    <div class="row">
-      <div><label class="f">Name</label><input type="text" id="e_name" value="${esc(eig.name || '')}" placeholder="z.B. Muster AG"></div>
-      <div><label class="f">Zusatz <span class="hint" style="display:inline">– z.B. «z.H. Frau Muster»</span></label>
-        <input type="text" id="e_name2" value="${esc(eig.name2 || '')}"></div>
-    </div>
-    <div class="row">
-      <div><label class="f">Telefon</label><input type="text" id="e_tel" inputmode="tel" value="${esc(eig.tel || '')}"></div>
-      <div><label class="f">E-Mail</label><input type="text" id="e_mail" inputmode="email" autocapitalize="none" value="${esc(eig.mail || '')}"></div>
-    </div>
-    <div class="row">
-      <div style="flex:2"><label class="f">Strasse, Nr.</label><input type="text" id="e_str" value="${esc(eig.strasse || '')}"></div>
-      <div class="narrow"><label class="f">PLZ</label><input type="text" id="e_plz" inputmode="numeric" value="${esc(eig.plz || '')}"></div>
-      <div><label class="f">Ort</label><input type="text" id="e_ort" value="${esc(eig.ort || '')}"></div>
-    </div>
-  </div>
+    <h3 style="margin-top:0">Eigentümer und Verwaltung</h3>
+    <div class="hint" style="margin-top:0">Gelten für das ganze Objekt. Gehört eine einzelne Anlage jemand
+      anderem (z.B. bei Stockwerkeigentum), lässt sich das im Reiter 🔌 Anlagen <b>pro Anlage</b> erfassen –
+      dann erscheint dort der abweichende Eigentümer auf SiNa und Protokoll.</div>
 
-  <div class="card">
-    <h3 style="margin-top:0">Verwaltung <span class="hint" style="display:inline">– nur falls vorhanden</span></h3>
-    <div class="row">
-      <div><label class="f">Name</label><input type="text" id="v_name" value="${esc(verw.name || '')}"></div>
-      <div><label class="f">Zusatz <span class="hint" style="display:inline">– z.B. «z.H. Frau Muster»</span></label>
-        <input type="text" id="v_name2" value="${esc(verw.name2 || '')}"></div>
-      <div class="narrow" style="flex:0 0 170px"><label class="f">Telefon</label>
-        <input type="text" id="v_tel" inputmode="tel" value="${esc(verw.tel || '')}"></div>
+    <label class="f">Eigentümer</label>
+    <div class="row" style="align-items:center">
+      <div style="flex:1"><div class="eiganzeige" id="k_eig_txt">${esc(eig.name || '– noch keiner erfasst –')}
+        ${eig.name && (eig.strasse || eig.ort)
+          ? '<span class="hint" style="display:inline">' + esc([eig.strasse, [eig.plz, eig.ort].filter(Boolean).join(' ')].filter(Boolean).join(', ')) + '</span>'
+          : ''}</div></div>
+      <div class="narrow" style="flex:0 0 auto"><button class="btn small" id="k_eig">✎ Eigentümer</button></div>
     </div>
-    <div class="row">
-      <div style="flex:2"><label class="f">Strasse, Nr.</label><input type="text" id="v_str" value="${esc(verw.strasse || '')}"></div>
-      <div class="narrow"><label class="f">PLZ</label><input type="text" id="v_plz" inputmode="numeric" value="${esc(verw.plz || '')}"></div>
-      <div><label class="f">Ort</label><input type="text" id="v_ort" value="${esc(verw.ort || '')}"></div>
+
+    <label class="f">Verwaltung <span class="hint" style="display:inline">– nur falls vorhanden</span></label>
+    <div class="row" style="align-items:center">
+      <div style="flex:1"><div class="eiganzeige" id="k_verw_txt">${esc(verw.name || '– keine –')}
+        ${verw.name && (verw.strasse || verw.ort)
+          ? '<span class="hint" style="display:inline">' + esc([verw.strasse, [verw.plz, verw.ort].filter(Boolean).join(' ')].filter(Boolean).join(', ')) + '</span>'
+          : ''}</div></div>
+      <div class="narrow" style="flex:0 0 auto"><button class="btn small" id="k_verw">✎ Verwaltung</button></div>
     </div>
   </div>`;
 
@@ -2788,29 +3637,29 @@ function renderKunde() {
       if (['strasse', 'hausnr', 'plz', 'ort'].includes(feld)) $('#ctxtitle').textContent = kontrolleTitel(k);
     });
   }
+  // Ändert sich die Adresse, gehört die Kontrolle zu einem anderen Gebäude.
+  // Erst beim Verlassen des Feldes – und nur mit Verbindung.
+  ['k_str', 'k_nr', 'k_plz', 'k_ort'].forEach(id =>
+    $('#' + id).addEventListener('blur', () => gebaeudeZuordnen(k)));
   // Kürzel immer gross
   $('#k_zug').addEventListener('blur', e => {
     e.target.value = e.target.value.trim().toUpperCase();
     k.zugewiesen = e.target.value;
     feldSpeichern('kontrollen', k.id, 'zugewiesen', k.zugewiesen);
   });
-  // Eigentümer / Verwaltung (JSON-Spalten)
-  [['e_name', 'eig', 'name'], ['e_name2', 'eig', 'name2'], ['e_tel', 'eig', 'tel'], ['e_mail', 'eig', 'mail'],
-   ['e_str', 'eig', 'strasse'], ['e_plz', 'eig', 'plz'], ['e_ort', 'eig', 'ort'],
-   ['v_name', 'verwaltung', 'name'], ['v_name2', 'verwaltung', 'name2'], ['v_tel', 'verwaltung', 'tel'],
-   ['v_str', 'verwaltung', 'strasse'], ['v_plz', 'verwaltung', 'plz'], ['v_ort', 'verwaltung', 'ort']]
-    .forEach(([id, spalte, schluessel]) => bindeJsonFeld($('#' + id), k, spalte, schluessel, 'kontrollen'));
-
-  $('#k_adrcopy').addEventListener('click', () => {
-    k.eig = Object.assign({}, k.eig, { strasse: (k.strasse + ' ' + k.hausnr).trim(), plz: k.plz, ort: k.ort });
-    feldSpeichern('kontrollen', k.id, 'eig', k.eig);
-    renderKunde();
-  });
-  $$('#rollewahl button').forEach(b => b.addEventListener('click', () => {
-    k[rollenFeld] = b.classList.contains('r_inst') ? 'installateur' : 'kontrollorgan';
+  // Eigentümer und Verwaltung laufen über denselben Dialog wie bei der Anlage
+  $('#k_eig').addEventListener('click', () => kundeAdressDialog('eig'));
+  $('#k_verw').addEventListener('click', () => kundeAdressDialog('verwaltung'));
+  $('#k_art').addEventListener('click', async () => {
+    const art = await kontrollartFragen('Was machen wir bei dieser Kontrolle?',
+      meineArt || (meineRolle === 'installateur' ? SK_ARTEN[0] : AKPK_ARTEN[1]), '');
+    if (!art) return;
+    k.kontrollart = artSetzen(k.kontrollart, art, alleinigeFirma());
+    feldSpeichern('kontrollen', k.id, 'kontrollart', k.kontrollart);
+    k[rollenFeld] = rolleZuArt(art);
     feldSpeichern('kontrollen', k.id, rollenFeld, k[rollenFeld]);
     renderKunde();
-  }));
+  });
   partnerBereich();
 }
 
@@ -2859,26 +3708,20 @@ async function partnerBereich() {
     return;
   }
 
-  const vorschlag = k.rolle_ersteller === 'installateur' ? 'kontrollorgan' : 'installateur';
-  const gesuchteRolle = () => {
-    const gewaehlt = document.querySelector('#p_rolle input:checked');
-    return gewaehlt ? gewaehlt.value : vorschlag;
-  };
+  // Gefragt wird, WAS die eingeladene Firma übernimmt – die Rolle folgt daraus.
+  // Vorbelegt ist die Gegenaufgabe zu dem, was wir selbst machen.
+  const unsereArt = (k.kontrollart || {})[k.rolle_ersteller === 'installateur' ? 'art_inst' : 'art_ko']
+    || (k.kontrollart || {}).wahl || '';
+  const vorschlagArt = k.rolle_ersteller === 'installateur' ? 'Abnahmekontrolle (AK)' : SK_ARTEN[0];
   const { data: favs } = await sb.from('firma_favoriten')
     .select('partner_firma_id, firmen_suche!inner(*)').eq('firma_id', S.profil.firma_id)
     .then(r => ({ data: (r.data || []).map(x => x.firmen_suche) }))
     .catch(() => ({ data: [] }));
 
-  box.innerHTML = `<div class="hint">Lade die Firma ein, die den anderen Teil übernimmt. Unsere Firma ist
-      <b>${esc(k.rolle_ersteller === 'installateur' ? 'Elektro-Installateur' : 'Unabhängiges Kontrollorgan')}</b>.
-      Die eingeladene Firma kann die Kontrolle sofort mitbearbeiten.</div>
-    <label class="f">Rolle der eingeladenen Firma</label>
-    <div class="chips" id="p_rolle">
-      <label class="chip"><input type="radio" name="partnerrolle" value="installateur"
-        ${vorschlag === 'installateur' ? 'checked' : ''} style="width:auto;margin-right:6px">Elektro-Installateur</label>
-      <label class="chip"><input type="radio" name="partnerrolle" value="kontrollorgan"
-        ${vorschlag === 'kontrollorgan' ? 'checked' : ''} style="width:auto;margin-right:6px">Unabhängiges Kontrollorgan</label>
-    </div>
+  box.innerHTML = `<div class="hint">Lade die Firma ein, die den anderen Teil übernimmt.
+      Wir machen hier <b>${esc(unsereArt || rolleName(k.rolle_ersteller))}</b>.
+      Beim Einladen wirst du gefragt, <b>was die andere Firma übernimmt</b> – daraus ergibt sich ihre
+      Rolle auf den Formularen. Sie kann die Kontrolle danach sofort mitbearbeiten.</div>
     ${(favs && favs.length) ? `<label class="f">Favoriten</label>
       <div class="chips" id="p_favs">${favs.map(f => `<button class="chip" data-fid="${f.id}">★ ${esc(f.name)}</button>`).join('')}</div>` : ''}
     <label class="f">Firma suchen</label>
@@ -2889,14 +3732,23 @@ async function partnerBereich() {
     <div id="p_treffer"></div>`;
 
   const einladen = async (fid, name) => {
-    const rollenText = gesuchteRolle() === 'installateur' ? 'Elektro-Installateur' : 'Unabhängiges Kontrollorgan';
-    if (!confirm(`«${name}» als Partnerfirma einladen?\n\nRolle der eingeladenen Firma: ${rollenText}\n\n`
-      + 'Sie kann die Kontrolle danach sehen und mitbearbeiten.')) return;
-    const rolle = gesuchteRolle();
+    const art = await kontrollartFragen('«' + name + '» einladen', vorschlagArt,
+      'Was übernimmt diese Firma?<br>Wir machen hier <b>'
+      + esc(unsereArt || rolleName(k.rolle_ersteller)) + '</b>.');
+    if (!art) return;
+    const rolle = rolleZuArt(art);
+    if (rolle === k.rolle_ersteller
+        && !confirm(`Achtung: Damit wären beide Firmen ${rolleName(rolle)}.\n\n`
+          + 'Auf dem Sicherheitsnachweis ist je ein Feld für den Elektro-Installateur und für das '
+          + 'unabhängige Kontrollorgan vorgesehen.\n\nTrotzdem so einladen?')) return;
+    const kontrollart = artSetzen(Object.assign({}, k.kontrollart), art);
+    kontrollart.wahl = (k.kontrollart || {}).wahl || '';    // unsere Wahl bleibt unsere
     const { error } = await sb.from('kontrollen')
-      .update({ partner_firma_id: fid, partner_rolle: rolle }).eq('id', k.id);
+      .update({ partner_firma_id: fid, partner_rolle: rolle, kontrollart }).eq('id', k.id);
     if (error) return fehler(error);
-    k.partner_firma_id = fid; k.partner_rolle = rolle;
+    k.partner_firma_id = fid; k.partner_rolle = rolle; k.kontrollart = kontrollart;
+    // Stand aller Anlagen festhalten – Grundlage für die spätere Freigabe
+    for (const a of (S.anlagen || [])) await standEinfrieren(a.id, 'vor_fremdbearbeitung');
     // Als Favorit merken (Fehler hier sind unkritisch)
     await sb.from('firma_favoriten').upsert({ firma_id: S.profil.firma_id, partner_firma_id: fid });
     renderKunde();
@@ -2990,6 +3842,43 @@ const PRUEFGRUENDE = ['Neuanlage', 'Bestehende Anlage', 'Änderung', 'Erweiterun
 const KONTROLLARTEN = ['Schlusskontrolle (NIV Art. 14)', 'Schlusskontrolle (NIV Art. 7/9)',
                        'Abnahmekontrolle (AK)', 'Periodische Kontrolle (PK)'];
 
+/* Die Kontrollart sagt, WAS gemacht wurde – die Rolle, WO auf dem Formular die
+   Firma steht. Aus der Art folgt die Rolle eindeutig: eine Schlusskontrolle
+   macht die Installationsfirma, eine Abnahme- oder periodische Kontrolle das
+   unabhängige Kontrollorgan. Darum wird nur noch nach der ART gefragt.
+
+   Bei zwei Firmen macht jede ihre eigene Kontrolle. Beide stehen im selben
+   SiNa, darum bekommt jede Seite ihren eigenen Platz:
+     kontrollart.art_inst  – was die Installationsfirma macht (Datum: datum_sk)
+     kontrollart.art_ko    – was das Kontrollorgan macht      (Datum: datum_akpk)
+   `wahl` bleibt daneben bestehen (ältere Kontrollen, Anzeige in der Liste). */
+const SK_ARTEN = ['Schlusskontrolle (NIV Art. 14)', 'Schlusskontrolle (NIV Art. 7/9)'];
+const AKPK_ARTEN = ['Abnahmekontrolle (AK)', 'Periodische Kontrolle (PK)'];
+const istSkArt = art => SK_ARTEN.includes(art);
+const rolleZuArt = art => istSkArt(art) ? 'installateur' : 'kontrollorgan';
+const artSlot = art => istSkArt(art) ? 'art_inst' : 'art_ko';
+const artenFuerRolle = rolle => rolle === 'installateur' ? SK_ARTEN : AKPK_ARTEN;
+const rolleName = r => r === 'installateur' ? 'Elektro-Installateur' : 'Unabhängiges Kontrollorgan';
+
+/* Kontrollart eintragen: in den Platz der zugehörigen Rolle und in `wahl`.
+   `alleinig` heisst «es gibt keine Partnerfirma» – dann wird der andere Platz
+   geleert. Sonst bliebe beim Wechsel von PK auf SK die alte PK stehen, und auf
+   dem Sicherheitsnachweis wären beide Arten angekreuzt. */
+function artSetzen(kontrollart, art, alleinig) {
+  const neu = Object.assign({}, kontrollart, { wahl: art });
+  if (art) neu[artSlot(art)] = art;
+  if (alleinig) {
+    const anderer = art && artSlot(art) === 'art_inst' ? 'art_ko' : 'art_inst';
+    delete neu[anderer];
+    // Auch die alten Einzel-Flags aus der Sync-Zeit, sonst kreuzen die mit an
+    ['sk', 'sk79', 'ak', 'pk'].forEach(f => { if (neu[f] !== undefined) delete neu[f]; });
+  }
+  return neu;
+}
+
+// Gibt es überhaupt eine zweite Firma? Nur dann hat der zweite Platz einen Sinn.
+const alleinigeFirma = () => !(S.kontrolle && S.kontrolle.partner_firma_id);
+
 /* Welche Firma erscheint als Auftragnehmer? Bei geteilten Kontrollen haben die
    beiden Firmen verschiedene Rollen: eine ist Installateur, die andere
    Kontrollorgan. Im MPP gehört bei AK und PK die Kontrollfirma ins Feld,
@@ -3004,6 +3893,465 @@ async function partnerFirmaLaden() {
   const { data } = await sb.from('firmen_suche').select('*').eq('id', k.partner_firma_id).maybeSingle();
   S.partnerFirma = data || null;
   return S.partnerFirma;
+}
+
+/* ============================================================
+   Beteiligte pro ANLAGE (Etappe F)
+
+   Auf einem Objekt kann Anlage A von einer anderen Firma installiert worden
+   sein als Anlage B. Darum hat jede Anlage ihren Installateur und ihr
+   Kontrollorgan. Die Rechte laufen serverseitig über `darf_anlage()`.
+
+   Ohne Verbindung bleibt die Zuordnung leer – dann gilt wie bisher die Rolle
+   der Kontrolle. Es geht also nie etwas kaputt, es fehlt nur die Feinheit.
+   ============================================================ */
+
+S.anlageFirmen = null;
+S.firmenCache = {};
+
+async function firmenNachladen(ids) {
+  const fehlend = Array.from(new Set(ids)).filter(id => id && !S.firmenCache[id]);
+  if (!fehlend.length || !navigator.onLine) return;
+  const { data } = await sb.from('firmen_suche').select('*').in('id', fehlend);
+  (data || []).forEach(f => { S.firmenCache[f.id] = f; });
+}
+
+async function anlageFirmenLaden(neu) {
+  if (S.anlageFirmen && !neu) return S.anlageFirmen;
+  if (!navigator.onLine || !S.kontrolle) return S.anlageFirmen || [];
+  const ids = (S.anlagen || []).map(a => a.id);
+  if (!ids.length) { S.anlageFirmen = []; return []; }
+  const { data, error } = await sb.from('anlage_firmen').select('*')
+    .in('anlage_id', ids).neq('status', 'entfernt');
+  if (error) return S.anlageFirmen || [];
+  S.anlageFirmen = data || [];
+  await firmenNachladen(S.anlageFirmen.map(x => x.firma_id));
+  return S.anlageFirmen;
+}
+
+const anlageFirmaZeile = (anlageId, rolle) =>
+  (S.anlageFirmen || []).find(x => x.anlage_id === anlageId && x.rolle === rolle) || null;
+
+// Die Firma einer Anlage in der gesuchten Rolle – im selben Format wie firmaNachRolle
+function anlageFirma(a, rolle) {
+  const z = a && anlageFirmaZeile(a.id, rolle);
+  if (!z || !z.firma_id) return null;
+  const f = S.firmenCache[z.firma_id]
+    || (S.firma && S.firma.id === z.firma_id ? S.firma : null)
+    || (S.partnerFirma && S.partnerFirma.id === z.firma_id ? S.partnerFirma : null);
+  if (!f) return null;
+  return { firma: f, rolle, eigene: f.id === S.profil.firma_id,
+           bew: (rolle === 'installateur' ? f.inst_bewilligung : f.kontroll_bewilligung) || '' };
+}
+
+/* Firma einer Anlage zuordnen. Die alte wird auf «entfernt» gesetzt – der
+   eindeutige Index lässt je Anlage und Rolle nur eine aktive zu. */
+async function anlageFirmaSetzen(anlageId, rolle, firmaId) {
+  if (!navigator.onLine) {
+    alert('Zum Zuordnen einer Firma braucht es eine Verbindung.');
+    return false;
+  }
+  const alt = anlageFirmaZeile(anlageId, rolle);
+  if (alt) {
+    const { error } = await sb.from('anlage_firmen').update({ status: 'entfernt' }).eq('id', alt.id);
+    if (error) { fehler(error); return false; }
+  }
+  if (firmaId) {
+    // Kommt eine FREMDE Firma an die Anlage, wird vorher festgehalten, wie sie
+    // aussah – damit man ihre Änderungen später prüfen kann.
+    if (firmaId !== S.profil.firma_id) await standEinfrieren(anlageId, 'vor_fremdbearbeitung');
+    const { error } = await sb.from('anlage_firmen').insert({
+      anlage_id: anlageId, firma_id: firmaId, rolle, status: 'aktiv', eingeladen_von: S.profil.id });
+    if (error) { fehler(error); return false; }
+  }
+  await anlageFirmenLaden(true);
+  return true;
+}
+
+// Neue Anlage: die Firmen der Kontrolle gleich mitnehmen
+async function anlageFirmenErben(anlageId) {
+  if (!navigator.onLine) return;
+  const k = S.kontrolle || {};
+  const paare = [[k.firma_id, k.rolle_ersteller], [k.partner_firma_id, k.partner_rolle]]
+    .filter(([f, r]) => f && r);
+  for (const [f, r] of paare) {
+    try { await sb.from('anlage_firmen').insert({ anlage_id: anlageId, firma_id: f, rolle: r,
+      status: 'aktiv', eingeladen_von: S.profil.id }); } catch (e) { /* schon da */ }
+  }
+  await anlageFirmenLaden(true);
+}
+
+/* Eine Firma aus dem System auswählen. Firmen werden nie von Hand getippt –
+   sie pflegen ihre Adresse selbst, damit sie überall stimmt. */
+async function firmaWaehlenDialog(titel, rolle) {
+  return new Promise(async res => {
+    const ov = document.createElement('div');
+    ov.className = 'overlay firmabox';
+    ov.innerHTML = `<div class="dialog" style="max-width:600px">
+      <h3>${esc(titel)}</h3>
+      <div class="dlgtext">Gesucht ist die Firma als
+        <b>${esc(rolleName(rolle))}</b>.</div>
+      <div id="fw_favs"></div>
+      <label class="f">Firma suchen</label>
+      <div class="row" style="align-items:flex-end">
+        <div><input type="text" id="fw_suche" placeholder="Name der Firma, z.B. Käser"></div>
+        <div class="narrow" style="flex:0 0 auto"><button class="btn" id="fw_suchen">🔍 Suchen</button></div>
+      </div>
+      <div id="fw_treffer"></div>
+      <div class="btnrow">
+        <button class="btn danger" id="fw_weg">Zuordnung entfernen</button>
+        <button class="btn" id="fw_ab">Abbrechen</button>
+      </div>
+      <div class="hint">Firmen lassen sich nicht von Hand erfassen – sie pflegen ihre Adresse und
+        Bewilligungsnummer selbst. Ist die Firma noch nicht im System, kommt die Einladung per
+        Mail in einer späteren Etappe.</div>
+    </div>`;
+    document.body.appendChild(ov);
+    const fertig = w => { ov.remove(); res(w); };
+    ov.addEventListener('click', e => { if (e.target === ov) fertig(undefined); });
+    ov.querySelector('#fw_ab').addEventListener('click', () => fertig(undefined));
+    ov.querySelector('#fw_weg').addEventListener('click', () => fertig(null));
+
+    const karten = (liste, wohin) => {
+      $(wohin).innerHTML = liste.length ? liste.map(f => `<div class="card kcard" data-fid="${f.id}"
+          style="margin:6px 0;cursor:pointer">
+          <div class="kinfo"><div class="kt">${esc(f.name)}</div>
+            <div class="ks">${esc([f.strasse, [f.plz, f.ort].filter(Boolean).join(' ')].filter(Boolean).join(', ') || '—')}
+              ${f.inst_bewilligung ? ' · Inst. ' + esc(f.inst_bewilligung) : ''}
+              ${f.kontroll_bewilligung ? ' · Kontr. ' + esc(f.kontroll_bewilligung) : ''}</div></div>
+          <button class="btn primary small">Wählen</button>
+        </div>`).join('') : '<div class="hint">Keine Firma gefunden.</div>';
+      $$(wohin + ' .kcard').forEach(c => c.addEventListener('click', () => fertig(c.dataset.fid)));
+    };
+
+    // Vorschläge: die eigene Firma, die Partnerfirma und die Favoriten
+    const vor = [S.firma, S.partnerFirma].filter(Boolean);
+    try {
+      const { data } = await sb.from('firma_favoriten')
+        .select('firmen_suche!inner(*)').eq('firma_id', S.profil.firma_id);
+      (data || []).forEach(x => { if (!vor.some(f => f.id === x.firmen_suche.id)) vor.push(x.firmen_suche); });
+    } catch (e) { /* Favoriten sind Zugabe */ }
+    if (vor.length) {
+      $('#fw_favs').innerHTML = '<label class="f" style="margin-top:0">Naheliegend</label><div id="fw_vor"></div>';
+      karten(vor, '#fw_vor');
+    }
+    const suchen = async () => {
+      const t = $('#fw_suche').value.trim();
+      if (t.length < 2) return alert('Bitte mindestens zwei Buchstaben eingeben.');
+      const { data, error } = await sb.from('firmen_suche').select('*').ilike('name', '%' + t + '%').limit(20);
+      if (error) return fehler(error);
+      karten(data || [], '#fw_treffer');
+    };
+    $('#fw_suchen').addEventListener('click', suchen);
+    $('#fw_suche').addEventListener('keydown', e => { if (e.key === 'Enter') suchen(); });
+  });
+}
+
+/* ============================================================
+   Nachrichten und Aufgaben (Etappe I)
+
+   Die App verschickt NICHTS selbst – sie liegt auf GitHub Pages und darf den
+   Mailzugang gar nicht kennen. Sie schreibt nur eine Zeile in «nachrichten»;
+   eine Edge Function holt sie alle paar Minuten ab und verschickt sie über
+   den SMTP-Zugang. Weil das Einreihen durch dieselbe Warteschlange läuft wie
+   alles andere, löst auch eine Unterschrift im Keller ihre Mail aus, sobald
+   das Gerät wieder Empfang hat.
+   ============================================================ */
+
+const AUFGABEN_NAMEN = {
+  unterschrift_kontrollbericht: 'Unterschrift Kontrollbericht angefordert',
+  unterschrift_sina_mp: 'Unterschrift SiNa/MP angefordert',
+  unabhaengige_unterschrift: 'Unabhängige Unterschrift angefordert',
+  maengel_beheben: 'Mängel beheben',
+  aenderungen_pruefen: 'Änderungen prüfen',
+  vnb_zurueckgewiesen: 'Vom Netzbetreiber zurückgewiesen',
+  lizenz_angefordert: 'Lizenz angefordert'
+};
+const AUFGABEN_ZEICHEN = {
+  unterschrift_kontrollbericht: '✍', unterschrift_sina_mp: '✍',
+  unabhaengige_unterschrift: '✍', maengel_beheben: '🔧',
+  aenderungen_pruefen: '🔍', vnb_zurueckgewiesen: '⚠️', lizenz_angefordert: '🔑'
+};
+
+/* Mails verschickt jede Person SELBST aus ihrem eigenen Mailprogramm (Entscheid
+   vom 05.10.2026 – der automatische Versand ist vorerst nicht umsetzbar).
+   Die App bereitet Betreff und Text vor und öffnet das Mailprogramm; die
+   Empfängeradresse kennt sie nicht – Personen einer fremden Firma darf man
+   aus Datenschutzgründen nicht lesen. Das Mailprogramm schlägt sie aus den
+   Kontakten vor.
+
+   Wichtig: Die Mail ist nur ein zusätzlicher Hinweis. Die andere Firma sieht
+   die Aufgabe ohnehin im Reiter Start, sobald sie die App öffnet.
+   (Die Tabelle `nachrichten` und die Edge Function bleiben für später liegen.) */
+
+function firmaName(id) {
+  if (!id) return '';
+  if (S.firma && S.firma.id === id) return S.firma.name || '';
+  if (S.partnerFirma && S.partnerFirma.id === id) return S.partnerFirma.name || '';
+  return ((S.firmenCache || {})[id] || {}).name || '';
+}
+
+function mailVorschlagen({ firmaName: an, betreff, text }) {
+  return new Promise(res => {
+    const ov = document.createElement('div');
+    ov.className = 'overlay mailbox';
+    ov.innerHTML = `<div class="dialog" style="max-width:560px">
+      <h3>${esc(an || 'Die andere Firma')} informieren?</h3>
+      <div class="dlgtext">Die Firma sieht die Aufgabe ohnehin im Reiter 🏠 Start, sobald sie die App
+        öffnet. Eine Mail ist ein zusätzlicher Hinweis – Betreff und Text sind schon vorbereitet,
+        die Adresse trägst du selbst ein.</div>
+      <div class="hint" style="margin-bottom:6px">Betreff: <b>${esc(betreff)}</b></div>
+      <textarea readonly style="min-height:150px;font-size:13px">${esc(text)}</textarea>
+      <div class="btnrow">
+        <button class="btn primary" id="mv_mail">✉ Mail öffnen</button>
+        <button class="btn" id="mv_kopie">📋 Text kopieren</button>
+        <button class="btn" id="mv_nein">Nicht nötig</button>
+      </div>
+    </div>`;
+    document.body.appendChild(ov);
+    const fertig = w => { ov.remove(); res(w); };
+    ov.querySelector('#mv_nein').addEventListener('click', () => fertig('nein'));
+    ov.querySelector('#mv_mail').addEventListener('click', () => {
+      // \r\n ist der Zeilenumbruch, den alle Mailprogramme verstehen
+      const kodiert = s => encodeURIComponent(String(s || '').replace(/\r?\n/g, '\r\n'));
+      location.href = `mailto:?subject=${kodiert(betreff)}&body=${kodiert(text)}`;
+      fertig('mail');
+    });
+    ov.querySelector('#mv_kopie').addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(betreff + '\n\n' + text);
+        ov.querySelector('#mv_kopie').textContent = '✓ Kopiert';
+      } catch (e) {
+        alert('Kopieren ging nicht – bitte den Text oben von Hand markieren und kopieren.');
+      }
+    });
+  });
+}
+
+/* Eine Aufgabe für eine Firma stellen – auch für eine fremde, darum über eine
+   Funktion auf dem Server, die prüft, ob sie überhaupt beteiligt ist. */
+async function aufgabeStellen({ firmaId, art, text, kontrolleId, anlageId }) {
+  if (!navigator.onLine || !firmaId) return null;
+  try {
+    const { error } = await sb.rpc('aufgabe_stellen', {
+      ziel_firma: firmaId, k_id: kontrolleId || (S.kontrolle && S.kontrolle.id) || null,
+      a_id: anlageId || null, die_art: art, der_text: text || '' });
+    if (error) protokollieren('Aufgabe nicht gestellt', art, error);
+    S.aufgaben = null;
+    return !error;
+  } catch (e) { protokollieren('Aufgabe nicht gestellt', art, e); return null; }
+}
+
+S.aufgaben = null;
+
+async function aufgabenLaden(neu) {
+  if (S.aufgaben && !neu) return S.aufgaben;
+  if (!navigator.onLine || !S.profil) return S.aufgaben || [];
+  const { data, error } = await sb.from('aufgaben').select('*')
+    .is('erledigt_am', null).order('angefordert_am', { ascending: false }).limit(100);
+  if (error) return S.aufgaben || [];
+  S.aufgaben = data || [];
+  return S.aufgaben;
+}
+
+async function aufgabeErledigen(id) {
+  if (!navigator.onLine) return;
+  await sb.from('aufgaben').update({
+    erledigt_am: new Date().toISOString(), erledigt_von: S.profil.id }).eq('id', id);
+  S.aufgaben = null;
+}
+
+/* Erledigt sich eine Aufgabe von selbst (die Unterschrift kommt, die
+   Änderungen sind geprüft), verschwindet sie beim nächsten Laden. */
+async function aufgabenAufraeumen() {
+  if (!navigator.onLine || !S.kontrolle) return;
+  const offen = await aufgabenLaden(true);
+  for (const auf of offen.filter(x => x.kontrolle_id === S.kontrolle.id)) {
+    let erledigt = false;
+    if (auf.art === 'aenderungen_pruefen') {
+      erledigt = !(S.staende || []).some(s => s.anlage_id === auf.anlage_id);
+    } else if (auf.art === 'unterschrift_sina_mp' && auf.anlage_id) {
+      erledigt = (S.unterschriften || []).some(u => u.anlage_id === auf.anlage_id
+        && u.firma_id === S.profil.firma_id);
+    }
+    if (erledigt) await aufgabeErledigen(auf.id);
+  }
+}
+
+/* ============================================================
+   Eingefrorene Stände – Alt/Neu mit Freigabe (Etappe H)
+
+   Arbeitet eine FREMDE Firma an einer Anlage, wird vorher festgehalten, wie
+   sie aussah. Unterschreibt die fremde Firma, sieht man die Gegenüberstellung
+   und entscheidet: annehmen oder verwerfen.
+
+   Eingefroren wird dort, wo die Übergabe tatsächlich passiert – beim
+   Zuordnen einer fremden Firma zu einer Anlage und beim Einladen einer
+   Partnerfirma. Später hängen sich die Mängelbehebung und die Nachbesserung
+   nach einer VNB-Rückweisung an dasselbe Werkzeug.
+   ============================================================ */
+
+S.staende = null;
+
+// Was gehört zum «Stand»: die Anlage selbst, ihre Messzeilen, die
+// Sichtprüfung und ihre Mängel. Alles, was auf ihren Formularen landet.
+async function standDatenSammeln(anlageId) {
+  const hole = async (tabelle, spalte) => {
+    const { data } = await sb.from(tabelle).select('*').eq(spalte, anlageId);
+    return data || [];
+  };
+  const a = (S.anlagen || []).find(x => x.id === anlageId);
+  return {
+    anlage: a || null,
+    gruppen: await hole('gruppen', 'anlage_id'),
+    sichtkontrolle: await hole('sichtkontrolle', 'anlage_id'),
+    maengel: await hole('maengel', 'anlage_id')
+  };
+}
+
+async function staendeLaden(neu) {
+  if (S.staende && !neu) return S.staende;
+  if (!navigator.onLine || !S.kontrolle) return S.staende || [];
+  const { data, error } = await sb.from('anlage_staende').select('*')
+    .eq('kontrolle_id', S.kontrolle.id).is('erledigt_am', null);
+  if (error) return S.staende || [];
+  S.staende = data || [];
+  return S.staende;
+}
+
+const offenerStand = anlageId => (S.staende || []).find(s => s.anlage_id === anlageId) || null;
+
+/* Stand einfrieren, bevor eine fremde Firma an die Anlage geht. Gibt es
+   schon einen offenen, bleibt der stehen – er ist die ältere und damit
+   richtige Grundlage. */
+async function standEinfrieren(anlageId, grund) {
+  if (!navigator.onLine || !S.profil || !anlageId) return null;
+  try {
+    await staendeLaden(true);
+    if (offenerStand(anlageId)) return null;
+    const daten = await standDatenSammeln(anlageId);
+    const { error } = await sb.from('anlage_staende').insert({
+      anlage_id: anlageId, kontrolle_id: S.kontrolle.id, firma_id: S.profil.firma_id,
+      grund: grund || 'vor_fremdbearbeitung', daten, erstellt_von: S.profil.id });
+    if (error) { protokollieren('Stand nicht eingefroren', anlageId, error); return null; }
+    S.staende = null;
+    return true;
+  } catch (e) { protokollieren('Stand nicht eingefroren', anlageId, e); return null; }
+}
+
+/* Die Gegenüberstellung. Verglichen wird Feld für Feld; gemeldet werden
+   geänderte, dazugekommene und verschwundene Zeilen. */
+function standVergleichen(stand, jetzt) {
+  const alt = stand.daten || {};
+  const raus = [];
+  const ohne = ['id', 'updated_at', 'updated_by', 'kontrolle_id', 'anlage_id', 'erstellt_am'];
+
+  const zeilenVergleich = (bereich, altListe, neuListe, name) => {
+    const altNach = new Map((altListe || []).map(z => [z.id, z]));
+    const neuNach = new Map((neuListe || []).map(z => [z.id, z]));
+    neuNach.forEach((n, id) => {
+      const a = altNach.get(id);
+      if (!a) { raus.push({ bereich, zeile: name(n), feld: '', alt: '(neu dazugekommen)', neu: '✓' }); return; }
+      Object.keys(n).forEach(f => {
+        if (ohne.includes(f)) return;
+        const av = a[f], nv = n[f];
+        if (JSON.stringify(av ?? '') === JSON.stringify(nv ?? '')) return;
+        raus.push({ bereich, zeile: name(n), feld: f,
+                    alt: String(av ?? '') || '(leer)', neu: String(nv ?? '') || '(leer)' });
+      });
+    });
+    altNach.forEach((a, id) => {
+      if (!neuNach.has(id)) raus.push({ bereich, zeile: name(a), feld: '', alt: '✓', neu: '(gelöscht)' });
+    });
+  };
+
+  // Die Anlage selbst
+  if (alt.anlage && jetzt.anlage) {
+    Object.keys(jetzt.anlage).forEach(f => {
+      if (ohne.includes(f) || f === 'sk_angaben') return;
+      const av = alt.anlage[f], nv = jetzt.anlage[f];
+      if (JSON.stringify(av ?? '') === JSON.stringify(nv ?? '')) return;
+      raus.push({ bereich: 'Anlage', zeile: jetzt.anlage.name || '', feld: f,
+                  alt: String(av ?? '') || '(leer)', neu: String(nv ?? '') || '(leer)' });
+    });
+  }
+  zeilenVergleich('Messzeile', alt.gruppen, jetzt.gruppen,
+    z => [z.nr, z.bez].filter(Boolean).join(' ') || 'Zeile');
+  zeilenVergleich('Sichtkontrolle', alt.sichtkontrolle, jetzt.sichtkontrolle, z => z.punkt || '');
+  zeilenVergleich('Mangel', alt.maengel, jetzt.maengel,
+    z => [z.ort, (z.text || '').slice(0, 30)].filter(Boolean).join(' – ') || 'Eintrag');
+  return raus;
+}
+
+// Annehmen: der neue Stand gilt, der eingefrorene wird abgehakt
+async function standAnnehmen(stand) {
+  const { error } = await sb.from('anlage_staende').update({
+    erledigt_am: new Date().toISOString(), erledigt_wie: 'angenommen', erledigt_von: S.profil.id
+  }).eq('id', stand.id);
+  if (error) return fehler(error);
+  S.staende = null;
+}
+
+/* Verwerfen: zuerst die fremden Unterschriften dieser Anlage entfernen –
+   sonst blockiert die Sperre das Zurückschreiben –, dann den alten Stand
+   wiederherstellen. */
+async function standVerwerfen(stand) {
+  const alt = stand.daten || {};
+  const fremde = (S.unterschriften || [])
+    .filter(u => u.anlage_id === stand.anlage_id && u.firma_id !== S.profil.firma_id);
+
+  const anlName = ((S.anlagen || []).find(a => a.id === stand.anlage_id) || {}).name || 'Anlage';
+  for (const u of fremde) {
+    const { error } = await sb.from('unterschriften').delete().eq('id', u.id);
+    if (error) return fehler(error);
+    await sb.from('unterschriften_log').insert({
+      kontrolle_id: stand.kontrolle_id, entfernt_von: S.profil.id,
+      beschreibung: `Unterschrift von ${u.name || 'unbekannt'} entfernt – Änderungen wurden verworfen`
+    });
+    await aufgabeStellen({ firmaId: u.firma_id, art: 'unterschrift_sina_mp',
+      kontrolleId: stand.kontrolle_id, anlageId: stand.anlage_id,
+      text: 'Unterschrift wurde entfernt – Anlage ' + anlName + ' bitte nochmals prüfen' });
+  }
+  S.unterschriften = (S.unterschriften || []).filter(u => !fremde.some(f => f.id === u.id));
+
+  // Zurückschreiben: geänderte Zeilen zurück, dazugekommene weg, fehlende neu
+  const zurueck = async (tabelle, altListe, spalte) => {
+    const { data: jetzt } = await sb.from(tabelle).select('*').eq(spalte, stand.anlage_id);
+    const altNach = new Map((altListe || []).map(z => [z.id, z]));
+    for (const n of (jetzt || [])) {
+      if (!altNach.has(n.id)) { await sb.from(tabelle).delete().eq('id', n.id); }
+    }
+    for (const a of (altListe || [])) {
+      const da = (jetzt || []).some(n => n.id === a.id);
+      if (da) await sb.from(tabelle).update(a).eq('id', a.id);
+      else await sb.from(tabelle).insert(a);
+    }
+  };
+  if (alt.anlage) await sb.from('anlagen').update(alt.anlage).eq('id', stand.anlage_id);
+  await zurueck('gruppen', alt.gruppen, 'anlage_id');
+  await zurueck('sichtkontrolle', alt.sichtkontrolle, 'anlage_id');
+  await zurueck('maengel', alt.maengel, 'anlage_id');
+
+  const { error } = await sb.from('anlage_staende').update({
+    erledigt_am: new Date().toISOString(), erledigt_wie: 'verworfen', erledigt_von: S.profil.id
+  }).eq('id', stand.id);
+  if (error) return fehler(error);
+  S.staende = null; S.gruppen = null; S.sicht = null; S.maengel = null;
+
+  // Erst JETZT – der Mailtext sagt, der alte Stand sei wiederhergestellt.
+  // Die betroffene Firma erfährt davon: je Firma eine Mail, auf Wunsch.
+  for (const fid of Array.from(new Set(fremde.map(u => u.firma_id)))) {
+    await mailVorschlagen({
+      firmaName: firmaName(fid),
+      betreff: 'Unterschrift entfernt – ' + kontrolleTitel(S.kontrolle),
+      text: `Guten Tag\n\n`
+        + `Ihre Unterschrift auf der Anlage «${anlName}» bei ${kontrolleTitel(S.kontrolle)} `
+        + `wurde entfernt, weil wir die Änderungen nicht übernommen haben.\n\n`
+        + `Der Stand von vorher ist wiederhergestellt. Bitte schauen Sie sich die Anlage `
+        + `in «Elektrokontrolle online» nochmals an und unterschreiben Sie danach neu.\n\n`
+        + `Freundliche Grüsse\n${S.profil.name || S.profil.kuerzel}\n${(S.firma || {}).name || ''}`
+    });
+  }
 }
 
 // Firma in der gesuchten Rolle – eigene oder Partnerfirma. Null, wenn niemand sie hat.
@@ -3056,7 +4404,9 @@ async function pvAltdatenUebernehmen() {
 // Gibt es dafür keine Firma, bleibt es bei der eigenen.
 function zustaendigeFirma(a) {
   const gesucht = istAkPk(a) ? 'kontrollorgan' : 'installateur';
-  return firmaNachRolle(gesucht)
+  // Zuerst die Firma DIESER Anlage – sie kann von der Kontrolle abweichen
+  return anlageFirma(a, gesucht)
+    || firmaNachRolle(gesucht)
     || firmaNachRolle((S.kontrolle || {}).rolle_ersteller)
     || { firma: S.firma || {}, bew: '', rolle: (S.kontrolle || {}).rolle_ersteller || 'kontrollorgan', eigene: true };
 }
@@ -3066,12 +4416,83 @@ const anlPruefgrund = a => ((a && a.sk_angaben && a.sk_angaben.pruefgrund)
 const anlKontrollart = a => ((a && a.sk_angaben && a.sk_angaben.kontrollart)
   || (S.kontrolle && S.kontrolle.kontrollart) || {});
 
-S.suche = { text: '', status: '', nur_meine: false, papierkorb: false };
+S.suche = { text: '', status: '', zugewiesen: '', von: '', bis: '',
+            papierkorb: false, ansicht: 'gebaeude', gebaeude: null };
 
 function kontrolleTitel(k) {
   const adr = [k.strasse + (k.hausnr ? ' ' + k.hausnr : ''),
                [k.plz, k.ort].filter(Boolean).join(' ')].filter(Boolean).join(', ');
   return adr || 'Neue Kontrolle';
+}
+
+/* ============================================================
+   Gebäude – die Klammer über den Kontrollen
+
+   Gruppiert wird nach der ADRESSE, nicht nach `gebaeude_id`. Das ist
+   Absicht: so funktioniert die Ansicht auch ohne Verbindung und für
+   Kontrollen, die im Gerät entstanden sind und noch keinem Gebäude
+   zugeordnet werden konnten. Die Kennung dient dem Gebäude selbst
+   (Objektangaben, später Eigentümer über alle Kontrollen hinweg).
+   ============================================================ */
+
+const gebSchluessel = k => [k.strasse, k.hausnr, k.plz]
+  .map(x => String(x || '').trim().toLowerCase()).join('|');
+
+const gebTitel = g => [String(g.strasse || '').trim() + (g.hausnr ? ' ' + String(g.hausnr).trim() : ''),
+  [g.plz, g.ort].filter(Boolean).join(' ')].filter(Boolean).join(', ') || 'Ohne Adresse';
+
+// Kontrollen zu Gebäuden zusammenfassen, jüngste zuerst
+function gebaeudeBilden(liste) {
+  const nach = new Map();
+  (liste || []).forEach(k => {
+    const s = gebSchluessel(k);
+    if (!nach.has(s)) {
+      nach.set(s, { schluessel: s, strasse: k.strasse, hausnr: k.hausnr, plz: k.plz, ort: k.ort,
+                    gebaeudeart: k.gebaeudeart, gebaeude_id: k.gebaeude_id || null, kontrollen: [] });
+    }
+    const g = nach.get(s);
+    if (!g.gebaeude_id && k.gebaeude_id) g.gebaeude_id = k.gebaeude_id;
+    if (!g.gebaeudeart && k.gebaeudeart) g.gebaeudeart = k.gebaeudeart;
+    g.kontrollen.push(k);
+  });
+  const zeit = k => new Date(k.erstellt_am || k.updated_at || 0).getTime();
+  const gebaeude = Array.from(nach.values());
+  gebaeude.forEach(g => {
+    g.kontrollen.sort((a, b) => zeit(b) - zeit(a));
+    g.neuste = g.kontrollen[0];
+    g.offen = g.kontrollen.filter(k => k.status !== 'Abgeschlossen').length;
+    g.eig = (g.kontrollen.find(k => k.eig && k.eig.name) || {}).eig || null;
+    g.zuletzt = Math.max(...g.kontrollen.map(k => new Date(k.updated_at || 0).getTime()));
+  });
+  gebaeude.sort((a, b) => b.zuletzt - a.zuletzt);
+  return gebaeude;
+}
+
+/* Das Gebäude zu einer Kontrolle beschaffen und die Kontrolle daran hängen.
+   Läuft nur mit Verbindung und ohne Lärm – die Gruppierung im Reiter Start
+   kommt ohnehin über die Adresse zustande, die Kennung ist die Zugabe. */
+async function gebaeudeZuordnen(k) {
+  if (!navigator.onLine || !S.profil || !k || !String(k.strasse || '').trim()) return null;
+  try {
+    const schl = gebSchluessel(k);
+    const felder = { strasse: k.strasse, hausnr: k.hausnr, plz: k.plz, ort: k.ort,
+                     gebaeudeart: k.gebaeudeart, gemeinde: k.gemeinde, parz_nr: k.parz_nr,
+                     egid: k.egid, vnb: k.vnb, vnb_objekt_nr: k.vnb_objekt_nr };
+    const { data: da } = await sb.from('gebaeude').select('id')
+      .eq('firma_id', S.profil.firma_id).eq('schluessel', schl).maybeSingle();
+    let id = da && da.id;
+    if (!id) {
+      const { data: neu, error } = await sb.from('gebaeude')
+        .insert(Object.assign({ firma_id: S.profil.firma_id }, felder)).select('id').single();
+      if (error) return null;
+      id = neu.id;
+    }
+    if (id && k.gebaeude_id !== id) {
+      k.gebaeude_id = id;
+      feldSpeichern('kontrollen', k.id, 'gebaeude_id', id);
+    }
+    return id;
+  } catch (e) { return null; }
 }
 
 async function renderKontrollen() {
@@ -3084,7 +4505,14 @@ async function renderKontrollen() {
   }
 
   const F = S.suche;
-  v.innerHTML = `<h2>Kontrollen</h2>
+  // Wer kommt als «zugewiesen an» in Frage? Das Team, ergänzt um alle Kürzel,
+  // die in der geladenen Liste vorkommen – so geht es auch ohne Verbindung.
+  const kuerzel = new Set((S.team || []).filter(istAktiv).map(p => p.kuerzel).filter(Boolean));
+  (S.listeStand || []).forEach(k => { if (k.zugewiesen) kuerzel.add(k.zugewiesen); });
+  if (S.profil.kuerzel) kuerzel.add(S.profil.kuerzel);
+
+  v.innerHTML = `<h2>Start</h2>
+    <div id="aufgabenbox"></div>
     <div class="btnrow" style="align-items:center">
       <button class="btn primary" id="btnNeu">＋ Neue Kontrolle</button>
       <button class="btn small" id="btnImport">⬆︎ Import</button>
@@ -3098,20 +4526,50 @@ async function renderKontrollen() {
           <select id="s_status"><option value="">– alle –</option>
             ${STATUS_STUFEN.map(s => `<option value="${s}" ${F.status === s ? 'selected' : ''}>${s}</option>`).join('')}
           </select></div>
-        <div class="narrow" style="flex:0 0 auto">
-          <label class="f"><input type="checkbox" id="s_meine" ${F.nur_meine ? 'checked' : ''} style="width:auto;margin-right:6px">nur mir zugewiesen</label>
+        <div class="narrow" style="flex:0 0 190px"><label class="f">Zugewiesen an</label>
+          <select id="s_zug">
+            <option value="">– alle –</option>
+            <option value="__ich" ${F.zugewiesen === '__ich' ? 'selected' : ''}>nur mir</option>
+            ${Array.from(kuerzel).sort().map(x =>
+              `<option value="${esc(x)}" ${F.zugewiesen === x ? 'selected' : ''}>${esc(x)}</option>`).join('')}
+          </select></div>
+      </div>
+      <div class="row" style="align-items:flex-end">
+        <div class="narrow" style="flex:0 0 190px"><label class="f">Kontrolldatum von</label>
+          <input type="date" id="s_von" value="${esc(F.von)}"></div>
+        <div class="narrow" style="flex:0 0 190px"><label class="f">bis</label>
+          <input type="date" id="s_bis" value="${esc(F.bis)}"></div>
+        <div style="flex:1">
+          <label class="f">Ansicht</label>
+          <div class="typtoggle" id="s_ansicht">
+            <button class="a_geb ${F.ansicht === 'gebaeude' ? 'on' : ''}">🏠 Gebäude</button>
+            <button class="a_kon ${F.ansicht === 'kontrollen' ? 'on' : ''}">🗂 Kontrollen</button>
+            <button class="a_arc ${F.ansicht === 'archiv' ? 'on' : ''}">📁 Archiv</button>
+          </div>
         </div>
       </div>
       <div class="hint" id="s_info"></div>
     </div>
     <div id="klist"><div class="empty">Wird geladen …</div></div>`;
 
-  $('#btnNeu').addEventListener('click', neueKontrolle);
+  $('#btnNeu').addEventListener('click', () => neueKontrolle());
   $('#btnImport').addEventListener('click', kontrolleImportieren);
-  $('#btnPapierkorb').addEventListener('click', () => { F.papierkorb = !F.papierkorb; renderKontrollen(); });
+  $('#btnPapierkorb').addEventListener('click', () => {
+    F.papierkorb = !F.papierkorb; F.gebaeude = null; renderKontrollen();
+  });
   $('#s_text').addEventListener('input', () => { F.text = $('#s_text').value; listeLaden(); });
   $('#s_status').addEventListener('change', () => { F.status = $('#s_status').value; listeLaden(); });
-  $('#s_meine').addEventListener('change', () => { F.nur_meine = $('#s_meine').checked; listeLaden(); });
+  $('#s_zug').addEventListener('change', () => { F.zugewiesen = $('#s_zug').value; listeLaden(); });
+  $('#s_von').addEventListener('change', () => { F.von = $('#s_von').value; listeLaden(); });
+  $('#s_bis').addEventListener('change', () => { F.bis = $('#s_bis').value; listeLaden(); });
+  $$('#s_ansicht button').forEach(b => b.addEventListener('click', () => {
+    F.ansicht = b.classList.contains('a_geb') ? 'gebaeude'
+      : b.classList.contains('a_arc') ? 'archiv' : 'kontrollen';
+    F.gebaeude = null;
+    renderKontrollen();
+  }));
+  if (navigator.onLine && !S.team) teamLaden().then(() => { if (S.view === 'kontrollen') renderKontrollen(); });
+  aufgabenZeichnen();
   listeLaden();
 }
 
@@ -3152,14 +4610,19 @@ function listeLaden() {
 
 async function listeJetztLaden() {
   const F = S.suche;
+  if (F.ansicht === 'archiv' && !F.papierkorb) return archivAnsicht();
+  const zugKuerzel = F.zugewiesen === '__ich' ? S.profil.kuerzel : F.zugewiesen;
   let q = sb.from('kontrollen')
-    .select('id, firma_id, partner_firma_id, rolle_ersteller, pv, status, zugewiesen, auftrag_nr, auftrag_bez,'
-          + ' strasse, hausnr, plz, ort, gebaeudeart, plan_datum, geloescht_am, updated_at, eig')
+    .select('id, firma_id, partner_firma_id, gebaeude_id, rolle_ersteller, pv, status, zugewiesen,'
+          + ' auftrag_nr, auftrag_bez, kontrollart, strasse, hausnr, plz, ort, gebaeudeart,'
+          + ' plan_datum, geloescht_am, erstellt_am, updated_at, eig')
     .order('plan_datum', { ascending: true, nullsFirst: false })
-    .limit(200);
+    .limit(400);
   q = F.papierkorb ? q.not('geloescht_am', 'is', null) : q.is('geloescht_am', null);
   if (F.status) q = q.eq('status', F.status);
-  if (F.nur_meine) q = q.eq('zugewiesen', S.profil.kuerzel);
+  if (zugKuerzel) q = q.eq('zugewiesen', zugKuerzel);
+  if (F.von) q = q.gte('plan_datum', F.von);
+  if (F.bis) q = q.lte('plan_datum', F.bis);
   if (F.text.trim()) {
     const t = '%' + F.text.trim() + '%';
     q = q.or(`strasse.ilike.${t},plz.ilike.${t},ort.ilike.${t},auftrag_nr.ilike.${t},auftrag_bez.ilike.${t}`);
@@ -3186,23 +4649,64 @@ async function listeJetztLaden() {
     pakete.forEach(p => { if (p.kontrolle) nachId.set(p.id, p.kontrolle); });
     data = Array.from(nachId.values()).filter(k => F.papierkorb ? k.geloescht_am : !k.geloescht_am);
     if (F.status) data = data.filter(k => k.status === F.status);
-    if (F.nur_meine) data = data.filter(k => k.zugewiesen === S.profil.kuerzel);
+    if (zugKuerzel) data = data.filter(k => k.zugewiesen === zugKuerzel);
+    if (F.von) data = data.filter(k => k.plan_datum && k.plan_datum >= F.von);
+    if (F.bis) data = data.filter(k => k.plan_datum && k.plan_datum <= F.bis);
     if (F.text.trim()) {
       const t = F.text.trim().toLowerCase();
       data = data.filter(k => ['strasse', 'plz', 'ort', 'auftrag_nr', 'auftrag_bez']
-        .some(f => String(k[f] || '').toLowerCase().includes(t)));
+        .some(f => String(k[f] || '').toLowerCase().includes(t))
+        || String((k.eig || {}).name || '').toLowerCase().includes(t));
     }
   }
+  S.listeStand = data;
   const imGeraet = new Set((await ablageAlle('pakete')).map(p => p.id));
+  const gefiltert = !!(F.text || F.status || F.zugewiesen || F.von || F.bis);
+
+  // Eine Gebäudeansicht ist offen → nur dessen Kontrollen zeigen
+  if (F.gebaeude && !F.papierkorb) {
+    return gebaeudeAnsicht(box, gebaeudeBilden(data).find(g => g.schluessel === F.gebaeude)
+      || { schluessel: F.gebaeude, kontrollen: [] }, imGeraet);
+  }
 
   const info = $('#s_info');
+  if (F.ansicht === 'gebaeude' && !F.papierkorb) {
+    const gebaeude = gebaeudeBilden(data);
+    if (info) info.textContent = `${gebaeude.length} Gebäude · ${data.length} Kontrolle(n)`
+      + (data.length === 400 ? ' (nur die ersten 400)' : '')
+      + (offlineListe ? ' · ⚡ ohne Verbindung: nur was im Gerät liegt' : '');
+    if (!gebaeude.length) {
+      box.innerHTML = `<div class="empty">${gefiltert ? 'Kein Gebäude passt zur Suche.'
+        : 'Noch keine Kontrolle erfasst. Tippe auf «＋ Neue Kontrolle».'}</div>`;
+      return;
+    }
+    box.innerHTML = gebaeude.map(g => `<div class="card kcard gebcard" data-g="${esc(g.schluessel)}">
+      <div class="kinfo">
+        <div class="kt">🏠 ${esc(gebTitel(g))}
+          ${g.offen ? `<span class="statusbadge">${g.offen} offen</span>`
+                    : '<span class="statusbadge sb-done">alles abgeschlossen</span>'}</div>
+        <div class="ks">${g.kontrollen.length} ${g.kontrollen.length === 1 ? 'Eintrag' : 'Einträge'}
+          ${g.gebaeudeart ? ' · ' + esc(g.gebaeudeart) : ''}
+          ${g.eig && g.eig.name ? ' · ' + esc(g.eig.name) : ''}
+          · zuletzt ${esc(fmtDate(new Date(g.zuletzt).toISOString()))}</div>
+      </div>
+      <button class="btn primary small" data-act="oeffnenGeb">Öffnen</button>
+    </div>`).join('');
+    $$('#klist .gebcard').forEach(c => c.addEventListener('click', () => {
+      S.suche.gebaeude = c.dataset.g;
+      listeJetztLaden();
+      window.scrollTo(0, 0);
+    }));
+    return;
+  }
+
   if (info) info.textContent = data.length + (F.papierkorb ? ' Kontrolle(n) im Papierkorb'
-    : ' Kontrolle(n)') + (data.length === 200 ? ' (nur die ersten 200)' : '')
+    : ' Kontrolle(n)') + (data.length === 400 ? ' (nur die ersten 400)' : '')
     + (offlineListe ? ' · ⚡ ohne Verbindung: nur was im Gerät liegt' : '');
 
   if (!data.length) {
     box.innerHTML = `<div class="empty">${F.papierkorb ? 'Der Papierkorb ist leer.'
-      : (F.text || F.status || F.nur_meine) ? 'Keine Kontrolle passt zur Suche.'
+      : gefiltert ? 'Keine Kontrolle passt zur Suche.'
       : 'Noch keine Kontrolle erfasst. Tippe auf «＋ Neue Kontrolle».'}</div>`;
     return;
   }
@@ -3235,9 +4739,173 @@ async function listeJetztLaden() {
     </div>`;
   }).join('');
 
+  kartenVerdrahten();
+}
+
+/* Die Aufgabenliste ganz oben im Reiter Start: was gerade auf uns wartet.
+   Antippen springt direkt an die Stelle. */
+async function aufgabenZeichnen() {
+  const box = $('#aufgabenbox');
+  if (!box) return;
+  if (!navigator.onLine) { box.innerHTML = ''; return; }
+  const liste = await aufgabenLaden(true);
+  if (!liste.length) { box.innerHTML = ''; return; }
+
+  // Zu welcher Adresse gehört die Aufgabe? Aus der zuletzt geladenen Liste.
+  const adr = kid => {
+    const k = (S.listeStand || []).find(x => x.id === kid);
+    return k ? kontrolleTitel(k) : '';
+  };
+  box.innerHTML = `<div class="card" style="border-left:5px solid var(--accent)">
+    <h3 style="margin-top:0">Zu erledigen (${liste.length})</h3>
+    ${liste.map(auf => `<div class="card kcard" style="margin:6px 0" data-auf="${auf.id}">
+      <div class="kinfo">
+        <div class="kt">${AUFGABEN_ZEICHEN[auf.art] || '•'} ${esc(AUFGABEN_NAMEN[auf.art] || auf.art)}</div>
+        <div class="ks">${esc(adr(auf.kontrolle_id) || auf.text || '')}
+          · ${esc(fmtDate(auf.angefordert_am))}</div>
+      </div>
+      ${auf.kontrolle_id ? '<button class="btn primary small" data-act="hin">Öffnen</button>' : ''}
+      <button class="btn small" data-act="weg">✓ Erledigt</button>
+    </div>`).join('')}
+  </div>`;
+
+  $$('#aufgabenbox .kcard button').forEach(b => b.addEventListener('click', async () => {
+    const id = b.closest('.kcard').dataset.auf;
+    const auf = liste.find(x => x.id === id);
+    if (!auf) return;
+    if (b.dataset.act === 'weg') {
+      await aufgabeErledigen(id);
+      return aufgabenZeichnen();
+    }
+    await kontrolleOeffnen(auf.kontrolle_id);
+    // Direkt dorthin, wo die Aufgabe hingehört
+    if (auf.anlage_id) S.anlageId = auf.anlage_id;
+    go(auf.art === 'maengel_beheben' ? 'maengel' : 'export');
+  }));
+}
+
+/* Alles, was unsere Firma je unterschrieben hat – auch aus Kontrollen, die
+   inzwischen einer anderen Firma gehören oder an denen wir nicht mehr
+   beteiligt sind. Möglich macht das die Spalte `dokumente.firmen`. */
+async function archivAnsicht() {
+  const box = $('#klist'), info = $('#s_info'), F = S.suche;
+  if (!box) return;
+  if (!navigator.onLine) {
+    box.innerHTML = '<div class="empty">⚡ Ohne Verbindung steht das Archiv nicht zur Verfügung.</div>';
+    if (info) info.textContent = '';
+    return;
+  }
+  box.innerHTML = '<div class="empty">Wird geladen …</div>';
+  let q = sb.from('dokumente')
+    .select('id, kontrolle_id, anlage_id, firmen, art, version, anlass, dateiname, pfad, groesse,'
+          + ' pruefsumme, erzeugt_am, schnappschuss')
+    .order('erzeugt_am', { ascending: false }).limit(300);
+  const { data, error } = await q;
+  if (error) { box.innerHTML = `<div class="empty">Fehler: ${esc(error.message)}</div>`; return; }
+
+  // Adresse und Auftrag stehen im Schnappschuss – so bleibt die Liste lesbar,
+  // auch wenn die Kontrolle inzwischen weg ist.
+  const adr = d => {
+    const k = (d.schnappschuss || {}).kontrolle || {};
+    return [(k.strasse || '') + (k.hausnr ? ' ' + k.hausnr : ''),
+            [k.plz, k.ort].filter(Boolean).join(' ')].filter(Boolean).join(', ') || 'Ohne Adresse';
+  };
+  const auftrag = d => ((d.schnappschuss || {}).kontrolle || {}).auftrag_nr || '';
+  const t = F.text.trim().toLowerCase();
+  const liste = (data || []).filter(d => !t
+    || adr(d).toLowerCase().includes(t) || auftrag(d).toLowerCase().includes(t)
+    || String(d.dateiname || '').toLowerCase().includes(t));
+
+  if (info) info.textContent = `${liste.length} abgelegte(s) Dokument(e)`
+    + ((data || []).length === 300 ? ' (nur die letzten 300)' : '');
+  if (!liste.length) {
+    box.innerHTML = `<div class="empty">${t ? 'Kein Dokument passt zur Suche.'
+      : 'Noch nichts abgelegt. Dokumente entstehen beim Unterschreiben.'}</div>`;
+    return;
+  }
+  box.innerHTML = liste.map(d => {
+    const auchPartner = (d.firmen || []).some(f => f !== S.profil.firma_id);
+    return `<div class="card kcard" data-dok="${d.id}">
+      <div class="kinfo">
+        <div class="kt">${esc(DOK_NAMEN[d.art] || d.art)}
+          <span class="statusbadge">${esc(adr(d))}</span>
+          ${d.version > 1 ? '<span class="statusbadge">Fassung ' + d.version + '</span>' : ''}
+          ${auchPartner ? '<span class="statusbadge sb-me">auch bei der Partnerfirma</span>' : ''}</div>
+        <div class="ks">${esc(fmtDate(d.erzeugt_am))} · ${esc(DOK_ANLASS[d.anlass] || d.anlass)}
+          ${auftrag(d) ? ' · ' + esc(auftrag(d)) : ''}
+          · ${Math.max(1, Math.round(d.groesse / 1024))} kB</div>
+      </div>
+      <button class="btn small" data-act="holen">⬇︎ Öffnen</button>
+      <button class="btn danger small" data-act="weg">🗑 Entfernen</button>
+    </div>`;
+  }).join('');
   $$('#klist .kcard button').forEach(b => b.addEventListener('click', async () => {
-    const id = b.closest('.kcard').dataset.id;
+    const d = liste.find(x => x.id === b.closest('.kcard').dataset.dok);
+    if (!d) return;
+    if (b.dataset.act === 'holen') return dokumentHolen(d);
+    b.disabled = true;
+    if (await dokumentEntfernen(d)) archivAnsicht(); else b.disabled = false;
+  }));
+}
+
+/* Das elektrische Leben eines Gebäudes: alles, was hier je gemacht wurde,
+   mit Art, Erstellungsdatum, Status, Auftragsnummer und -bezeichnung. */
+function gebaeudeAnsicht(box, g, imGeraet) {
+  const info = $('#s_info');
+  if (info) info.textContent = `${g.kontrollen.length} Eintrag/Einträge in diesem Gebäude`;
+  const neuste = g.neuste || {};
+  const eig = g.eig || {};
+  const objekt = [['Gebäudeart', g.gebaeudeart], ['Gemeinde', neuste.gemeinde],
+                  ['Parz.-Nr.', neuste.parz_nr], ['EGID', neuste.egid], ['VNB', neuste.vnb]]
+    .filter(([, w]) => String(w || '').trim());
+
+  box.innerHTML = `
+    <div class="btnrow"><button class="btn small" id="g_zurueck">← Alle Gebäude</button></div>
+    <div class="card">
+      <h3 style="margin-top:0">🏠 ${esc(gebTitel(g))}</h3>
+      <div class="hint">${objekt.length
+        ? objekt.map(([l, w]) => `${esc(l)}: <b>${esc(w)}</b>`).join(' · ')
+        : 'Zu diesem Objekt sind noch keine weiteren Angaben erfasst.'}
+        ${eig.name ? '<br>Eigentümer: <b>' + esc(eig.name) + '</b>' : ''}</div>
+      <div class="btnrow"><button class="btn primary" id="g_neu">＋ Neue Kontrolle in diesem Gebäude</button></div>
+      <div class="hint">Adresse, Objektangaben, Eigentümer und Verwaltung werden aus dem letzten
+        Eintrag übernommen – du musst sie nicht neu erfassen.</div>
+    </div>
+    ${g.kontrollen.length ? g.kontrollen.map(k => {
+      const fremd = k.firma_id !== S.profil.firma_id;
+      const art = (k.kontrollart && k.kontrollart.wahl) || '';
+      return `<div class="card kcard ${k.status === 'Abgeschlossen' ? 'done' : ''}" data-id="${k.id}">
+        <div class="kinfo">
+          <div class="kt">${esc(art || k.auftrag_bez || 'Kontrolle')}
+            ${k.status ? `<span class="statusbadge ${k.status === 'Abgeschlossen' ? 'sb-done' : ''}">${esc(k.status)}</span>` : ''}
+            ${k.pv ? '<span class="statusbadge">☀️ PV</span>' : ''}
+            ${fremd ? '<span class="statusbadge sb-me">geteilt mit uns</span>' : ''}
+            ${k.partner_firma_id && !fremd ? '<span class="statusbadge sb-me">geteilt</span>' : ''}</div>
+          <div class="ks">erfasst ${esc(dat(k.erstellt_am))}
+            ${k.auftrag_nr ? ' · ' + esc(k.auftrag_nr) : ''}
+            ${art && k.auftrag_bez ? ' · ' + esc(k.auftrag_bez) : ''}
+            ${k.plan_datum ? ' · 📅 ' + esc(dat(k.plan_datum)) : ''}
+            ${k.zugewiesen ? ' · 👤 ' + esc(k.zugewiesen) : ''}</div>
+        </div>
+        <button class="btn primary small" data-act="oeffnen">Öffnen</button>
+        <button class="btn small" data-act="mitnehmen">${imGeraet.has(k.id) ? '✓ dabei' : '📥 Mitnehmen'}</button>
+        <button class="btn danger small" data-act="loeschen">Löschen</button>
+      </div>`;
+    }).join('') : '<div class="empty">In diesem Gebäude ist noch nichts erfasst.</div>'}`;
+
+  $('#g_zurueck').addEventListener('click', () => { S.suche.gebaeude = null; listeJetztLaden(); });
+  $('#g_neu').addEventListener('click', () => neueKontrolle(g.neuste || null));
+  kartenVerdrahten();
+}
+
+// Die Knöpfe Öffnen / Mitnehmen / Löschen – in beiden Listen dieselben
+function kartenVerdrahten() {
+  $$('#klist .kcard button[data-act]').forEach(b => b.addEventListener('click', async (ev) => {
+    ev.stopPropagation();
+    const karte = b.closest('.kcard');
+    const id = karte.dataset.id;
     const act = b.dataset.act;
+    if (!id) return;
     if (act === 'oeffnen') return kontrolleOeffnen(id);
     if (act === 'mitnehmen') {
       if (!navigator.onLine) return alert('Zum Mitnehmen braucht es einmal eine Verbindung.');
@@ -3257,8 +4925,53 @@ async function listeJetztLaden() {
   }));
 }
 
-async function neueKontrolle() {
-  const eigeneRolle = (S.firma && S.firma.kontroll_bewilligung) ? 'kontrollorgan' : 'installateur';
+/* «Was machen wir hier?» – eine Frage statt zweier. Aus der Kontrollart folgt
+   die Rolle, und beides ist damit von Anfang an gesetzt. Vorausgewählt wird
+   nach der Bewilligung der Firma; ändern lässt es sich trotzdem, denn manche
+   Firmen haben beide. */
+function kontrollartFragen(titel, vorschlag, zusatz) {
+  return new Promise(res => {
+    const ov = document.createElement('div');
+    ov.className = 'overlay artbox';
+    ov.innerHTML = `<div class="dialog" style="max-width:560px">
+      <h3>${esc(titel)}</h3>
+      ${zusatz ? `<div class="dlgtext">${zusatz}</div>` : ''}
+      <div class="chips" style="flex-direction:column;align-items:stretch;gap:6px">
+        ${KONTROLLARTEN.map(art => `<label class="chip" style="text-align:left">
+          <input type="radio" name="kart" value="${esc(art)}"
+            ${art === vorschlag ? 'checked' : ''} style="width:auto;margin-right:8px">${esc(art)}
+          <span class="hint" style="display:inline">→ ${esc(rolleName(rolleZuArt(art)))}</span>
+        </label>`).join('')}
+      </div>
+      <div class="btnrow">
+        <button class="btn primary" id="art_ok">Übernehmen</button>
+        <button class="btn" id="art_ab">Abbrechen</button>
+      </div>
+      <div class="hint">Aus der Kontrollart ergibt sich, in welchem Feld der Formulare unsere Firma
+        erscheint und welche Bewilligungsnummer dort steht. Ändern lässt sich das später im
+        Reiter 👤 Kunde.</div>
+    </div>`;
+    document.body.appendChild(ov);
+    const fertig = wert => { ov.remove(); res(wert); };
+    ov.addEventListener('click', e => { if (e.target === ov) fertig(null); });
+    ov.querySelector('#art_ab').addEventListener('click', () => fertig(null));
+    ov.querySelector('#art_ok').addEventListener('click', () => {
+      const g = ov.querySelector('input[name="kart"]:checked');
+      fertig(g ? g.value : null);
+    });
+  });
+}
+
+async function neueKontrolle(vorlage) {
+  const f = S.firma || {};
+  // Vorauswahl nach der Bewilligung: wer nur eine hat, macht auch nur das eine
+  const vorschlag = (f.kontroll_bewilligung && !f.inst_bewilligung) ? 'Periodische Kontrolle (PK)'
+    : (f.inst_bewilligung && !f.kontroll_bewilligung) ? 'Schlusskontrolle (NIV Art. 14)'
+    : (f.kontroll_bewilligung ? 'Periodische Kontrolle (PK)' : 'Schlusskontrolle (NIV Art. 14)');
+  const art = await kontrollartFragen('Neue Kontrolle – was machen wir hier?', vorschlag,
+    vorlage ? 'In <b>' + esc(gebTitel(vorlage)) + '</b>.' : '');
+  if (!art) return;                       // abgebrochen – es entsteht nichts
+  const eigeneRolle = rolleZuArt(art);
   // Die Kennung entsteht im Gerät – so lässt sich auch ohne Empfang eine
   // Kontrolle anlegen und sofort ausfüllen.
   const zeile = {
@@ -3269,12 +4982,23 @@ async function neueKontrolle() {
     pv: false, status: 'Erfasst', status_rank: 0,
     zugewiesen: S.profil.kuerzel, kontrolleure: [],
     auftrag_nr: '', auftrag_bez: '', kontrollumfang: '', plan_datum: null,
-    pruefgrund: {}, kontrollart: {},
+    pruefgrund: {}, kontrollart: artSetzen({}, art, true),
     strasse: '', hausnr: '', plz: '', ort: '', gebaeudeart: '', gemeinde: '',
     parz_nr: '', egid: '', vnb: '', vnb_objekt_nr: '', bemerkung: '',
     eig: {}, verwaltung: {}, hak: '', messgeraete: (S.grund && S.grund.messgeraete) || '',
-    weitere: {}, geloescht_am: null, updated_at: new Date().toISOString()
+    weitere: {}, gebaeude_id: null, geloescht_am: null, updated_at: new Date().toISOString()
   };
+  /* Aus einem Gebäude heraus angelegt: Adresse, Objektangaben, Eigentümer und
+     Verwaltung kommen aus dem letzten Eintrag. Der Auftrag selbst bleibt leer –
+     der ist jedes Mal ein anderer. */
+  if (vorlage) {
+    ['strasse', 'hausnr', 'plz', 'ort', 'gebaeudeart', 'gemeinde', 'parz_nr', 'egid',
+     'vnb', 'vnb_objekt_nr', 'gebaeude_id'].forEach(f => {
+      if (vorlage[f]) zeile[f] = vorlage[f];
+    });
+    if (vorlage.eig && vorlage.eig.name) zeile.eig = vorlage.eig;
+    if (vorlage.verwaltung && vorlage.verwaltung.name) zeile.verwaltung = vorlage.verwaltung;
+  }
   await auftragEinreihen({ art: 'insert', tabelle: 'kontrollen', werte: zeile });
   S.kontrolle = zeile;
   S.anlagen = []; S.anlageId = null; S.gruppen = null; S.maengel = [];
@@ -3391,6 +5115,18 @@ function aenderungEingetroffen(tabelle, nachricht) {
   // Eigene Änderungen ignorieren – die stehen schon auf dem Bildschirm
   if (neu.updated_by && neu.updated_by === S.profil.id) return;
 
+  /* Supabase schickt bei einer Änderung IMMER die ganze Zeile – auch die
+     Felder, welche die andere Person gar nicht angefasst hat. Wer nur den
+     neuen Stand ansieht, hält darum jedes abweichende Feld für geändert und
+     überschreibt damit die eigene, noch nicht gesendete Eingabe.
+     Mit «replica identity full» (Nachtrag 10) kommt der ALTE Stand mit, und
+     man sieht genau, welches Feld die andere Person geändert hat. Fehlt der
+     Nachtrag, enthält `old` nur die Kennung – dann gilt wie bisher jedes
+     abweichende Feld als geändert, und es schützt allein die Warteschlange. */
+  const vorher = (nachricht.eventType === 'UPDATE' && nachricht.old) || null;
+  const altBekannt = !!vorher && Object.keys(vorher).length > 1;
+  const fremdGeaendert = f => !altBekannt || String(vorher[f] ?? '') !== String(neu[f] ?? '');
+
   const uebernehmen = (liste, schluessel) => {
     if (!liste) return false;
     if (nachricht.eventType === 'DELETE') {
@@ -3400,20 +5136,28 @@ function aenderungEingetroffen(tabelle, nachricht) {
     }
     const i = liste.findIndex(x => x.id === neu.id);
     if (i >= 0) {
-      // Felder, die gerade bearbeitet werden, nicht überschreiben (Konflikt)
+      // Felder, die gerade bearbeitet werden, nicht überschreiben (Konflikt).
+      // Nachgefragt wird nur, wenn die andere Person das Feld WIRKLICH geändert hat.
       const offen = speicherWarteschlange.get(schluessel + ':' + neu.id) || {};
-      const konflikte = Object.keys(offen).filter(f => String(offen[f]) !== String(neu[f]));
+      const konflikte = Object.keys(offen)
+        .filter(f => fremdGeaendert(f) && String(offen[f]) !== String(neu[f]));
       Object.keys(neu).forEach(f => { if (!(f in offen)) liste[i][f] = neu[f]; });
       if (konflikte.length) konfliktMerken(schluessel, neu, offen, konflikte);
     } else {
       liste.push(neu);
+      // Gleich einsortieren – sonst hinge ein fremder Eintrag hinten dran und
+      // das Gerät zeigte eine andere Reihenfolge als nach dem nächsten Laden.
+      if ('reihenfolge' in neu) liste.sort(nachFeldUndId('reihenfolge'));
     }
     return true;
   };
 
   let neuZeichnen = false;
   if (tabelle === 'kontrollen' && S.kontrolle && neu.id === S.kontrolle.id) {
-    Object.keys(neu).forEach(f => { if (f !== 'id') S.kontrolle[f] = neu[f]; });
+    // Auch hier: was noch in der eigenen Warteschlange liegt, bleibt stehen –
+    // sonst überschriebe eine fremde Änderung im Reiter Kunde die eigene.
+    const offenK = speicherWarteschlange.get('kontrollen:' + neu.id) || {};
+    Object.keys(neu).forEach(f => { if (f !== 'id' && !(f in offenK)) S.kontrolle[f] = neu[f]; });
     neuZeichnen = true;
   }
   if (tabelle === 'anlagen') neuZeichnen = uebernehmen(S.anlagen, 'anlagen') || neuZeichnen;
@@ -3432,7 +5176,12 @@ function aenderungEingetroffen(tabelle, nachricht) {
   // In der Messtabelle nur die betroffenen Felder auffrischen – sonst verliert
   // man beim Tippen den Cursor
   if (S.view === 'mess' && tabelle === 'gruppen' && nachricht.eventType === 'UPDATE') {
+    // Eigene, noch nicht gesendete Werte NICHT anfassen. Vorher wurde beim
+    // Eintreffen einer fremden Änderung die ganze Zeile ins Formular
+    // geschrieben – und damit die eben getippte Zahl wieder gelöscht.
+    const offenG = speicherWarteschlange.get('gruppen:' + neu.id) || {};
     Object.keys(neu).forEach(f => {
+      if (f in offenG || !fremdGeaendert(f)) return;
       const el = document.querySelector(`tr[data-gid="${neu.id}"] input[data-feld="${f}"]`);
       if (el && el !== document.activeElement && el.value !== String(neu[f] ?? '')) {
         el.value = neu[f] ?? '';
@@ -3536,7 +5285,7 @@ function anlagenChips(beimWechsel) {
       $('#chipAdd').addEventListener('click', async () => {
         const neueAnlage = await zeileAnlegen('anlagen', {
           kontrolle_id: S.kontrolle.id,
-          reihenfolge: (S.anlagen || []).length,
+          reihenfolge: naechsteNr(S.anlagen),
           name: 'Anlage ' + ((S.anlagen || []).length + 1)
         });
         // Jede Anlage beginnt mit der Zuleitung als erster Messzeile
@@ -3544,6 +5293,7 @@ function anlagenChips(beimWechsel) {
           anlage_id: neueAnlage.id, kontrolle_id: S.kontrolle.id, reihenfolge: 0, bez: 'Zuleitung'
         });
         S.anlagen.push(neueAnlage); S.anlageId = neueAnlage.id; S.gruppen = null;
+        await anlageFirmenErben(neueAnlage.id);   // Firmen der Kontrolle mitnehmen
         beimWechsel();
       });
     }
@@ -3553,9 +5303,31 @@ function anlagenChips(beimWechsel) {
 async function renderAnlagen() {
   const v = $('#view');
   if (!S.anlagen) { v.innerHTML = '<div class="empty">Wird geladen …</div>'; await anlagenLaden(); }
+  await anlageFirmenLaden();
   const k = S.kontrolle;
   const chips = anlagenChips(renderAnlagen);
   const a = akt();
+  // Unsere Aufgabe in dieser Kontrolle – danach richtet sich die Auswahl unten
+  const meineRolleHier = (k.firma_id === S.profil.firma_id ? k.rolle_ersteller : k.partner_rolle)
+    || 'kontrollorgan';
+  const KAh = a ? anlKontrollart(a) : {};
+  const artDerAnderen = KAh[meineRolleHier === 'installateur' ? 'art_ko' : 'art_inst'] || '';
+  // Die nächste Anlage DAVOR, die in dieser Rolle schon eine Firma hat
+  const vorigeMitFirma = (anl, rolle) => {
+    const alle = S.anlagen || [];
+    const hier = alle.findIndex(x => x.id === anl.id);
+    const passt = x => {
+      const z = anlageFirmaZeile(x.id, rolle);
+      return x.id !== anl.id && z && z.firma_id;
+    };
+    const treffer = alle.slice(0, Math.max(0, hier)).reverse().find(passt)
+      || alle.slice(hier + 1).find(passt);
+    if (!treffer) return null;
+    const z = anlageFirmaZeile(treffer.id, rolle);
+    const jetzt = anlageFirmaZeile(anl.id, rolle);
+    if (jetzt && jetzt.firma_id === z.firma_id) return null;   // schon dieselbe
+    return { name: treffer.name || 'Anlage', firma_id: z.firma_id };
+  };
 
   let html = `<h2>Anlagen</h2>
     <div class="card">
@@ -3674,6 +5446,18 @@ async function renderAnlagen() {
       <div><label class="f">Stromkunde</label><input type="text" id="a_kunde" value="${esc(a.stromkunde)}"></div>
       <div><label class="f">Stockwerk / Lage</label><input type="text" id="a_stock" value="${esc(a.stockwerk)}"></div>
     </div>
+    <label class="f">Eigentümer der Anlage</label>
+    <div class="row" style="align-items:center">
+      <div style="flex:1">
+        <div class="eiganzeige" id="a_eig_txt">${esc(anlEig(a).name || '– noch keiner erfasst –')}
+          ${eigenerEig(a) ? '' : (adrLeer(anlEig(a)) ? ''
+            : '<span class="hint" style="display:inline">– aus dem Reiter Kunde</span>')}</div>
+      </div>
+      <div class="narrow" style="flex:0 0 auto"><button class="btn small" id="a_eig">✎ Eigentümer</button></div>
+    </div>
+    <div class="hint">Der Eigentümer der Anlage muss nicht der des Gebäudes sein (z.B. Stockwerkeigentum).
+      Ohne eigenen Eintrag gilt der aus dem Reiter 👤 Kunde. Er erscheint auf <b>SiNa und
+      Mess- und Prüfprotokoll dieser Anlage</b>.</div>
     <label class="f">Nutzung und Kontrollperiode(n) – zweite Zeile z.B. für Sch III</label>
     <div class="row">
       <div><input type="text" id="a_nutz1" value="${esc(a.periode2_txt ? a.periode2_txt : '')}" placeholder="Nutzung, z.B. Wohnung"></div>
@@ -3703,6 +5487,30 @@ async function renderAnlagen() {
   </div>
 
   <div class="card">
+    <h3 style="margin-top:0">Beteiligte Firmen</h3>
+    <div class="hint" style="margin-top:0">Wer hat <b>diese Anlage</b> installiert, wer kontrolliert sie?
+      Auf einem Objekt kann das je Anlage verschieden sein. Daraus ergibt sich, welche Firma mit welcher
+      Bewilligungsnummer auf SiNa und Protokoll erscheint – und wer die Anlage überhaupt sehen darf.</div>
+    ${['installateur', 'kontrollorgan'].map(r => {
+      const f = anlageFirma(a, r);
+      const vorige = vorigeMitFirma(a, r);
+      return `<label class="f">${esc(rolleName(r))}</label>
+        <div class="row" style="align-items:center">
+          <div style="flex:1"><div class="eiganzeige">${f ? esc(f.firma.name) : '– noch niemand –'}
+            ${f && f.bew ? '<span class="hint" style="display:inline">Bew. ' + esc(f.bew) + '</span>' : ''}
+            ${f && f.eigene ? '<span class="statusbadge sb-me">wir</span>' : ''}</div></div>
+          <div class="narrow" style="flex:0 0 auto">
+            <button class="btn small af_w" data-rolle="${r}">✎ Wählen</button>
+            ${vorige ? `<button class="btn small af_v" data-rolle="${r}"
+              data-fid="${vorige.firma_id}">⟳ Aus «${esc(vorige.name)}»</button>` : ''}
+          </div>
+        </div>`;
+    }).join('')}
+    ${navigator.onLine ? '' : '<div class="hint">⚡ Ohne Verbindung nicht änderbar – es gilt so lange '
+      + 'die Rolle aus dem Reiter 👤 Kunde.</div>'}
+  </div>
+
+  <div class="card">
     <h3 style="margin-top:0">Prüfgrund und durchgeführte Kontrolle</h3>
     <div class="hint">Gilt <b>für diese Anlage</b> – jede Anlage kann einen eigenen Grund haben.
       Im Formular erscheint nur das Gewählte, angekreuzt und ohne die übrigen leeren Kästchen.</div>
@@ -3711,11 +5519,16 @@ async function renderAnlagen() {
         <select id="a_pgrund"><option value="">– keiner –</option>
           ${PRUEFGRUENDE.map(s => `<option value="${esc(s)}" ${anlPruefgrund(a).wahl === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
         </select></div>
-      <div><label class="f">Durchgeführte Kontrolle</label>
+      <div><label class="f">Durchgeführte Kontrolle <span class="hint" style="display:inline">– was WIR hier machen</span></label>
         <select id="a_kart"><option value="">– keine –</option>
-          ${KONTROLLARTEN.map(s => `<option value="${esc(s)}" ${anlKontrollart(a).wahl === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
+          ${(S.alleArtenZeigen ? KONTROLLARTEN : artenFuerRolle(meineRolleHier))
+            .map(s => `<option value="${esc(s)}" ${anlKontrollart(a).wahl === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
         </select></div>
     </div>
+    <div class="hint">Angeboten wird, was zu unserer Aufgabe passt (<b>${esc(rolleName(meineRolleHier))}</b>).
+      <a href="#" id="a_alleArten">${S.alleArtenZeigen ? 'nur passende zeigen' : 'alle anzeigen'}</a>
+      ${artDerAnderen ? `<br>Die Partnerfirma macht hier: <b>${esc(artDerAnderen)}</b> – beides erscheint
+        zusammen auf dem Sicherheitsnachweis.` : ''}</div>
     <div class="row">
       <div><label class="f">Prüfgrund – eigener Text <span class="hint" style="display:inline">(nur falls nötig)</span></label>
         <input type="text" id="a_pgrund_txt" value="${esc(anlPruefgrund(a).freitext || '')}"></div>
@@ -3764,6 +5577,18 @@ async function renderAnlagen() {
   bindeFeld($('#a_schutz'), a, 'schutzsystem', 'anlagen');
   bindeFeld($('#a_erder'), a, 'erder', 'anlagen');
   bindeFeld($('#a_asbest'), a, 'asbest', 'anlagen');
+  $('#a_eig').addEventListener('click', () => eigentuemerDialog(a));
+  $$('.af_w').forEach(b => b.addEventListener('click', async () => {
+    const rolle = b.dataset.rolle;
+    const jetzt = anlageFirma(a, rolle);
+    const wahl = await firmaWaehlenDialog(
+      (jetzt ? 'Andere Firma' : 'Firma') + ' für Anlage ' + (a.name || ''), rolle);
+    if (wahl === undefined) return;                       // abgebrochen
+    if (await anlageFirmaSetzen(a.id, rolle, wahl)) renderAnlagen();
+  }));
+  $$('.af_v').forEach(b => b.addEventListener('click', async () => {
+    if (await anlageFirmaSetzen(a.id, b.dataset.rolle, b.dataset.fid)) renderAnlagen();
+  }));
   $$('#a_status .statuswahl').forEach(b => b.addEventListener('click', () => {
     const neu = b.dataset.st;
     if (neu === anlageStatus(a)) return;
@@ -3829,10 +5654,23 @@ async function renderAnlagen() {
     });
   };
   [['pruefgrund', 'wahl', 'a_pgrund'], ['pruefgrund', 'freitext', 'a_pgrund_txt'],
-   ['kontrollart', 'wahl', 'a_kart'], ['kontrollart', 'datum_sk', 'a_kdatum'],
-   ['kontrollart', 'datum_akpk', 'a_kdatum2'],
+   ['kontrollart', 'datum_sk', 'a_kdatum'], ['kontrollart', 'datum_akpk', 'a_kdatum2'],
    ['kontrollart', 'anzeige_nr', 'a_anz_nr'], ['kontrollart', 'anzeige_jahr', 'a_anz_jahr']]
     .forEach(([block, schluessel, id]) => { const el = $('#' + id); if (el) anlBlock(block, schluessel, el); });
+
+  // Die Kontrollart geht zusätzlich in den Platz der zugehörigen Rolle, damit
+  // auf dem SiNa beide Firmen mit ihrer eigenen Kontrolle erscheinen.
+  $('#a_kart').addEventListener('change', () => {
+    a.sk_angaben = Object.assign({}, a.sk_angaben,
+      { kontrollart: artSetzen(anlKontrollart(a), $('#a_kart').value, alleinigeFirma()) });
+    feldSpeichern('anlagen', a.id, 'sk_angaben', a.sk_angaben);
+    renderAnlagen();
+  });
+  $('#a_alleArten').addEventListener('click', e => {
+    e.preventDefault();
+    S.alleArtenZeigen = !S.alleArtenZeigen;
+    renderAnlagen();
+  });
 
   $('#a_del').addEventListener('click', async () => {
     if (!confirm(`Anlage «${a.name || 'ohne Name'}» mit allen Messzeilen löschen?`)) return;
@@ -3846,7 +5684,7 @@ async function renderAnlagen() {
   $('#btnDiktat').addEventListener('click', async () => {
     const zeilen = diktatLesen($('#diktat').value);
     if (!zeilen.length) return alert('Keine Zeilen gefunden.');
-    const start = (S.gruppen || []).length;
+    const start = naechsteNr(S.gruppen);
     const neu = zeilen.map((z, i) => ({
       anlage_id: a.id, kontrolle_id: S.kontrolle.id, reihenfolge: start + i, nr: z.nr, bez: z.bez
     }));
@@ -3858,7 +5696,7 @@ async function renderAnlagen() {
 
   $('#btnAddG').addEventListener('click', async () => {
     await zeileAnlegen('gruppen', {
-      anlage_id: a.id, kontrolle_id: S.kontrolle.id, reihenfolge: (S.gruppen || []).length
+      anlage_id: a.id, kontrolle_id: S.kontrolle.id, reihenfolge: naechsteNr(S.gruppen)
     });
     S.gruppen = null;
     gruppenListe();
@@ -4402,7 +6240,7 @@ async function renderMaengel() {
   const neu = async typ => {
     const zeile = await zeileAnlegen('maengel', {
       kontrolle_id: S.kontrolle.id, anlage_id: S.anlageId, typ,
-      reihenfolge: S.maengel.length
+      reihenfolge: naechsteNr(S.maengel)
     });
     S.maengel.push(zeile);
     await renderMaengel();
@@ -4952,7 +6790,7 @@ async function optGrund() {
       <button class="btn primary" id="g_save">Speichern</button>
       <button class="btn danger small" id="g_reset">Auf Standard zurücksetzen</button>
     </div>
-    <div class="hint" style="margin-top:12px">App-Version: <b>Online 2.8</b></div>
+    <div class="hint" style="margin-top:12px">App-Version: <b>Online 3.11</b></div>
   </div>`;
 
   // Ändern darf nur der Admin (die Datenbank lässt es ohnehin nur ihm zu)
@@ -5258,15 +7096,19 @@ async function optTeam() {
   const { data, error } = await sb.from('benutzer').select('*').eq('firma_id', S.profil.firma_id).order('name');
   if (error) return fehler(error);
   const offen = data.filter(b => b.status === 'offen');
-  const aktiv = data.filter(b => b.status !== 'offen');
+  const aktiv = data.filter(b => b.status !== 'offen' && !b.ausgetreten_am);
+  const weg = data.filter(b => b.ausgetreten_am);
   const zeile = b => `<div class="card kcard" data-id="${b.id}">
       <div class="kinfo">
         <div class="kt">${esc(b.kuerzel || '—')} · ${esc(b.name || b.mail)}
           ${b.id === S.profil.id ? '<span class="statusbadge sb-me">das bist du</span>' : ''}
-          ${b.status === 'gesperrt' ? '<span class="statusbadge sb-lock">gesperrt</span>' : ''}</div>
+          ${b.ausgetreten_am ? `<span class="statusbadge sb-lock">ausgetreten ${esc(dat(b.ausgetreten_am))}</span>`
+            : b.status === 'gesperrt' ? '<span class="statusbadge sb-lock">gesperrt</span>' : ''}</div>
         <div class="ks">${esc(b.mail)}${b.telefon ? ' · ' + esc(b.telefon) : ''} · Rolle <b>${esc(b.rolle)}</b></div>
       </div>
-      ${b.status === 'offen'
+      ${b.ausgetreten_am
+        ? `<button class="btn primary small" data-act="zurueck">↩︎ Wiedereintritt</button>`
+        : b.status === 'offen'
         ? `<button class="btn primary small" data-act="frei">✓ Freischalten</button>
            <button class="btn danger small" data-act="ablehnen">Ablehnen</button>`
         : `<select class="rollewahl" data-id="${b.id}" ${b.id === S.profil.id || b.unantastbar ? 'disabled' : ''}>
@@ -5281,7 +7123,8 @@ async function optTeam() {
                style="width:auto;margin-right:6px">unterschriftsber.</label>
            <button class="btn small" data-act="pwmail" title="Mail zum Zurücksetzen des Passworts senden">🔑 Passwort</button>
            ${b.id === S.profil.id || b.unantastbar ? ''
-             : `<button class="btn small" data-act="${b.status === 'gesperrt' ? 'entsperren' : 'sperren'}">${b.status === 'gesperrt' ? 'Entsperren' : 'Sperren'}</button>`}`}
+             : `<button class="btn small" data-act="${b.status === 'gesperrt' ? 'entsperren' : 'sperren'}">${b.status === 'gesperrt' ? 'Entsperren' : 'Sperren'}</button>
+                <button class="btn danger small" data-act="austritt">Austritt</button>`}`}
     </div>`;
 
   $('#optbody').innerHTML = `
@@ -5294,7 +7137,13 @@ async function optTeam() {
         <b>kontrollberechtigte</b> und/oder als <b>unterschriftsberechtigte</b> Person. Ohne Häkchen
         kann die Person Kontrollen bearbeiten, aber nicht unterzeichnen.</div>
     </div>
-    ${aktiv.map(zeile).join('') || '<div class="empty">Noch keine Mitarbeiter.</div>'}`;
+    ${aktiv.map(zeile).join('') || '<div class="empty">Noch keine Mitarbeiter.</div>'}
+    ${weg.length ? `<div class="card"><h3 style="margin-top:0">Ausgetreten (${weg.length})</h3>
+      <div class="hint">Diese Personen arbeiten nicht mehr hier: sie können sich nicht mehr anmelden,
+        erscheinen in keiner Auswahl mehr und zählen nicht zur Mitarbeiterzahl.
+        <b>Ihr Name bleibt in allen Kontrollen und auf allen Unterschriften stehen</b> – daran ändert
+        ein Austritt nichts. Kommt jemand zurück, genügt «Wiedereintritt».</div>
+    </div>${weg.map(zeile).join('')}` : ''}`;
 
   $$('#optbody .kcard button').forEach(b => b.addEventListener('click', async () => {
     const id = b.closest('.kcard').dataset.id;
@@ -5313,11 +7162,24 @@ async function optTeam() {
       return error ? fehler(error) : alert('Die Mail wurde verschickt.');
     }
     if (act === 'ablehnen' && !confirm('Diese Registrierung ablehnen?\nDie Person kann sich danach nicht anmelden.')) return;
+    if (act === 'austritt') {
+      const person = data.find(x => x.id === id) || {};
+      if (!confirm(`Austritt von ${person.name || person.mail} eintragen?\n\n`
+        + '• Die Person kann sich nicht mehr anmelden\n'
+        + '• Sie verschwindet aus allen Auswahllisten\n'
+        + '• Sie zählt nicht mehr zur Mitarbeiterzahl\n\n'
+        + 'Ihr NAME BLEIBT in allen Kontrollen und auf allen Unterschriften stehen. '
+        + 'Ein Wiedereintritt ist jederzeit möglich.')) return;
+    }
+    const heute = new Date().toISOString().slice(0, 10);
     const werte = { frei: { status: 'frei' }, ablehnen: { status: 'gesperrt' },
-                    sperren: { status: 'gesperrt' }, entsperren: { status: 'frei' } }[act];
+                    sperren: { status: 'gesperrt' }, entsperren: { status: 'frei' },
+                    austritt: { status: 'gesperrt', ausgetreten_am: heute, ausgetreten_von: S.profil.id },
+                    zurueck: { status: 'frei', ausgetreten_am: null, ausgetreten_von: null } }[act];
     b.disabled = true;
     const { error } = await sb.from('benutzer').update(werte).eq('id', id);
     if (error) { b.disabled = false; return fehler(error); }
+    S.team = null;          // Auswahllisten neu aufbauen (Kontrolleure im Bericht)
     optTeam();
   }));
   const befugnisSetzen = async (el, feld) => {
