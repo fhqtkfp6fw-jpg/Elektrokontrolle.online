@@ -4327,12 +4327,14 @@ const AUFGABEN_NAMEN = {
   maengel_beheben: 'Mängel beheben',
   aenderungen_pruefen: 'Änderungen prüfen',
   vnb_zurueckgewiesen: 'Vom Netzbetreiber zurückgewiesen',
-  lizenz_angefordert: 'Lizenz angefordert'
+  lizenz_angefordert: 'Lizenz angefordert',
+  maengelbehebung_eingegangen: 'Mängelbehebung eingegangen'      // setzt die Edge Function «behebung»
 };
 const AUFGABEN_ZEICHEN = {
   unterschrift_kontrollbericht: '✍', unterschrift_sina_mp: '✍',
   unabhaengige_unterschrift: '✍', maengel_beheben: '🔧',
-  aenderungen_pruefen: '🔍', vnb_zurueckgewiesen: '⚠️', lizenz_angefordert: '🔑'
+  aenderungen_pruefen: '🔍', vnb_zurueckgewiesen: '⚠️', lizenz_angefordert: '🔑',
+  maengelbehebung_eingegangen: '✅'
 };
 
 /* Mails verschickt jede Person SELBST aus ihrem eigenen Mailprogramm (Entscheid
@@ -7110,7 +7112,7 @@ async function optGrund() {
       <button class="btn primary" id="g_save">Speichern</button>
       <button class="btn danger small" id="g_reset">Auf Standard zurücksetzen</button>
     </div>
-    <div class="hint" style="margin-top:12px">App-Version: <b>Online 3.17</b></div>
+    <div class="hint" style="margin-top:12px">App-Version: <b>Online 3.18</b></div>
   </div>`;
 
   // Ändern darf nur der Admin (die Datenbank lässt es ohnehin nur ihm zu)
