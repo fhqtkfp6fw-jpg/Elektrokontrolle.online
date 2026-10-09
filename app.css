@@ -339,3 +339,12 @@ input.fremdaenderung { background: #fff8dd; transition: background .4s; }
 .statusbadge.st-beim_vnb, .statusbadge.st-genehmigt, .statusbadge.st-zurueckgewiesen {
   font-size: 13px; padding: 5px 12px;
 }
+
+/* Eigentümer-Anzeige im Reiter Anlagen: nur der Name, Änderung über den Knopf */
+.eiganzeige {
+  border: 1px solid var(--line); border-radius: 10px; padding: 11px 14px;
+  background: #fafbfc; font-weight: 600; min-height: 44px; display: flex; align-items: center; gap: 8px;
+}
+.eiganzeige .hint { font-weight: 400; }
+.eigwahl { transition: border-color .12s; }
+.eigwahl:hover { border-color: var(--accent); }
