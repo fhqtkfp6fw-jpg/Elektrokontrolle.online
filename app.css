@@ -154,6 +154,19 @@ table.mess td input {
   border: none; border-radius: 0; width: 100%; font-size: 13px; padding: 11px 2px; text-align: center; background: transparent;
 }
 table.mess td.wide input { text-align: left; padding-left: 5px; }
+/* Bezeichnung bricht um und wächst mit dem Text */
+table.mess td textarea {
+  display: block; border: none; border-radius: 0; width: 100%; min-height: 0; resize: none; overflow: hidden;
+  font: inherit; font-size: 13px; line-height: 1.3; padding: 11px 2px 11px 5px; text-align: left;
+  background: transparent; white-space: pre-wrap; word-wrap: break-word;
+}
+/* Messen: Anlagen-Chips schiebbar, CSV-Knopf bleibt rechts stehen */
+.messkopf { display: flex; align-items: center; gap: 10px; margin: 8px 0 14px; }
+.messkopf .chips { flex: 1 1 auto; min-width: 0; margin: 0; flex-wrap: nowrap; overflow-x: auto;
+  -webkit-overflow-scrolling: touch; scrollbar-width: none; padding: 2px 0; }
+.messkopf .chips::-webkit-scrollbar { display: none; }
+.messkopf .chip { flex: 0 0 auto; white-space: nowrap; }
+.messkopf #mess_csv { flex: 0 0 auto; white-space: nowrap; }
 table.mess tr.zuleitung { background: #fdf6d8; }
 
 /* Mängel */
@@ -322,20 +335,22 @@ input.fremdaenderung { background: #fff8dd; transition: background .4s; }
    ------------------------------------------------------------------ */
 .chip.st-eroeffnet,        button.btn.st-eroeffnet,        .statusbadge.st-eroeffnet        { background:#2563eb; border-color:#2563eb; color:#fff; }
 .chip.st-gemessen,         button.btn.st-gemessen,         .statusbadge.st-gemessen         { background:#0e8f9c; border-color:#0e8f9c; color:#fff; }
+.chip.st-unterschrieben,   button.btn.st-unterschrieben,   .statusbadge.st-unterschrieben   { background:#facc15; border-color:#eab308; color:#3a2a00; }
 .chip.st-abgeschlossen,    button.btn.st-abgeschlossen,    .statusbadge.st-abgeschlossen    { background:#16a34a; border-color:#16a34a; color:#fff; }
 .chip.st-beim_vnb,         button.btn.st-beim_vnb,         .statusbadge.st-beim_vnb         { background:#e07b16; border-color:#e07b16; color:#fff; }
-.chip.st-genehmigt,        button.btn.st-genehmigt,        .statusbadge.st-genehmigt        { background:#d4a017; border-color:#d4a017; color:#2e2200; }
+.chip.st-genehmigt,        button.btn.st-genehmigt,        .statusbadge.st-genehmigt        { background:#16a34a; border-color:#16a34a; color:#fff; }   /* grün – Gelb heisst «unterschrieben» */
 .chip.st-zurueckgewiesen,  button.btn.st-zurueckgewiesen,  .statusbadge.st-zurueckgewiesen  { background:#dc2626; border-color:#dc2626; color:#fff; }
 
 .chip.st-eroeffnet.active,       button.btn.st-eroeffnet.active       { background:#ffffff; color:#1d4ed8; }
 .chip.st-gemessen.active,        button.btn.st-gemessen.active        { background:#d6f2f5; color:#0a6570; }
+.chip.st-unterschrieben.active,  button.btn.st-unterschrieben.active  { background:#fef9c3; color:#7a5a00; border-color:#eab308; }
 .chip.st-abgeschlossen.active,   button.btn.st-abgeschlossen.active   { background:#d3f5de; color:#116e33; }
 .chip.st-beim_vnb.active,        button.btn.st-beim_vnb.active        { background:#ffe6cd; color:#9c4f08; }
-.chip.st-genehmigt.active,       button.btn.st-genehmigt.active       { background:#fdf1c2; color:#7d5e00; }
+.chip.st-genehmigt.active,       button.btn.st-genehmigt.active       { background:#d3f5de; color:#116e33; }
 .chip.st-zurueckgewiesen.active, button.btn.st-zurueckgewiesen.active { background:#fcd7d7; color:#9d1717; }
 
 /* Statusknöpfe: nur der geltende Status trägt seine Farbe, die übrigen bleiben weiss */
-.statusbadge.st-eroeffnet, .statusbadge.st-gemessen, .statusbadge.st-abgeschlossen,
+.statusbadge.st-eroeffnet, .statusbadge.st-gemessen, .statusbadge.st-unterschrieben, .statusbadge.st-abgeschlossen,
 .statusbadge.st-beim_vnb, .statusbadge.st-genehmigt, .statusbadge.st-zurueckgewiesen {
   font-size: 13px; padding: 5px 12px;
 }

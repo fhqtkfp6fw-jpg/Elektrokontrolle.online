@@ -1,8 +1,8 @@
 'use strict';
 
-const CACHE = 'nivonline-v43';
+const CACHE = 'nivonline-v49';
 const ASSETS = ['./', './index.html', './app.css', './app.js', './config.js',
-                './supabase.js', './jspdf.min.js', './manifest.webmanifest',
+                './supabase.js', './jspdf.min.js', './qrcode.min.js', './manifest.webmanifest',
                 './icon-180.png', './icon-512.png'];
 
 self.addEventListener('install', e => {
@@ -26,6 +26,8 @@ self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
   // Alles zur Datenbank (Supabase) NIE aus dem Cache beantworten
   if (url.origin !== location.origin) return;
+  // Die Behebungs-App (Ordner behebung/) läuft nur online und darf nie aus diesem Cache kommen
+  if (url.pathname.includes('/behebung/')) return;
   e.respondWith(
     caches.match(e.request, { ignoreSearch: true }).then(hit =>
       hit || fetch(e.request).then(resp => {

@@ -286,7 +286,14 @@ function render() {
   }
   $('#ctxtitle').textContent = kontrolleTitel(S.kontrolle);
   // Nach dem Zeichnen die Sperre anwenden (die Renderer sind teils asynchron)
-  const fertig = p => Promise.resolve(p).then(sperreAnwenden);
+  // Fehlen die Unterschriften (z. B. nach einer fremden Änderung), zuerst nachladen –
+  // sonst bliebe eine frisch gesetzte Sperre in der Ansicht unsichtbar
+  const fertig = p => Promise.resolve(p).then(async () => {
+    if (!S.unterschriften && S.kontrolle) {
+      try { await unterschriftenLaden(); } catch (e) { protokollieren('Unterschriften nicht geladen', S.kontrolle.id, e); }
+    }
+    sperreAnwenden();
+  });
   if (S.view === 'kunde') return fertig(renderKunde());
   if (S.view === 'uv') return fertig(renderAnlagen());
   if (S.view === 'mess') return fertig(renderMess());
@@ -302,6 +309,7 @@ function render() {
    ============================================================ */
 
 S.unterschriften = null;
+S.berichtU = null;          // Unterschriften unter dem Kontrollbericht (dokument 'bericht') – sperren die Mängel
 S.berichtArt = 'kunde';      // «kunde» = ohne Notizen, «intern» = mit Notizen
 S.arbeitszeit = null;
 S.statusVerlauf = null;
@@ -323,10 +331,19 @@ async function statusVerlaufLaden() {
 
 async function unterschriftenLaden() {
   const data = await zeilenHolen('unterschriften', 'kontrolle_id', S.kontrolle.id, 'gesetzt_am');
-  S.unterschriften = data;
+  unterschriftenVerteilen(data);
   paketNachfuehren();
   return data;
 }
+
+/* In `unterschriften` liegen zwei Sorten: SiNa/MPP (sperren die ganze Kontrolle,
+   bestimmen den Anlagenstatus) und der Kontrollbericht (dokument 'bericht',
+   sperrt nur die Mängel). Alles, was S.unterschriften liest, meint SiNa/MPP. */
+function unterschriftenVerteilen(alle) {
+  S.unterschriften = (alle || []).filter(u => u.dokument !== 'bericht');
+  S.berichtU = (alle || []).filter(u => u.dokument === 'bericht');
+}
+const berichtGesperrt = () => (S.berichtU || []).length > 0;
 
 const istUnterzeichnet = () => (S.unterschriften || []).length > 0;
 // Nur die Firma, welche die Kontrolle angelegt hat, darf Unterschriften entfernen
@@ -335,7 +352,7 @@ const istErstellerfirma = () => !!S.kontrolle && S.kontrolle.firma_id === S.prof
 // Nach dem Unterschreiben sind alle Erfassungsfelder gesperrt. Ausnahmen:
 // das Bemerkungsfeld, der Anlagen-Wechsel, das Lösen der Partnerfirma und
 // der ganze Abschluss-Reiter (Dokumente, Bericht, Arbeitszeit, Unterschriften).
-const SPERRE_FREI = ['k_bem', 'p_trennen'];
+const SPERRE_FREI = ['k_bem', 'p_trennen', 'mess_csv'];   // CSV kopieren geht auch gesperrt
 
 /* Ist DIESE Anlage unterschrieben? Ältere Unterschriften ohne Anlagenbezug
    gelten für die ganze Kontrolle. */
@@ -347,8 +364,9 @@ function anlageUnterzeichnet(anlageId) {
 
 function sperreAnwenden() {
   const v = $('#view');
-  if (!v || !S.kontrolle || !istUnterzeichnet()) return;
+  if (!v || !S.kontrolle) return;
   if (S.view === 'export') return;      // im Abschluss bleibt alles bedienbar
+  if (!istUnterzeichnet() && !(S.view === 'maengel' && berichtGesperrt())) return;
 
   const hinweis = (txt) => {
     if ($('#sperrbanner')) return;
@@ -373,6 +391,15 @@ function sperreAnwenden() {
   if (S.view === 'kunde') {
     hinweis('🔒 <b>Es ist bereits unterschrieben.</b> Kunde und Auftrag erscheinen auf jedem Formular '
       + 'und sind darum gesperrt – ausser dem Feld «Bemerkungen».' + nachtrag);
+    sperren(v);
+    return;
+  }
+
+  // Kontrollbericht unterschrieben → alle Mängel gesperrt (auch auf dem Server)
+  if (S.view === 'maengel' && berichtGesperrt()) {
+    hinweis('🔒 <b>Der Kontrollbericht ist unterschrieben</b> (' + esc(S.berichtU.map(u => u.name).join(', '))
+      + '). Mängel, Informationen und Fotos sind darum gesperrt. Zum Bearbeiten im Reiter 📤 Abschluss '
+      + 'die Unterschrift unter dem Kontrollbericht entfernen.');
     sperren(v);
     return;
   }
@@ -579,6 +606,23 @@ async function renderAbschluss() {
       <div class="hint">${S.berichtArt === 'intern'
         ? 'Interner Bericht: enthält Mängel, Informationen UND Notizen – nicht für den Kunden bestimmt.'
         : 'Kundenbericht: enthält Mängel und Informationen, aber keine Notizen.'}</div>
+      <label class="f" style="margin-top:14px">Unterschrift unter dem Bericht</label>
+      ${(S.berichtU || []).length ? `
+        ${S.berichtU.map(u => `<div class="row" style="align-items:center;margin-top:6px" data-buid="${u.id}">
+          ${u.bild ? `<div class="sigpreview" style="flex:0 0 auto;max-width:200px"><img src="${u.bild}" alt="Unterschrift"></div>` : ''}
+          <div style="flex:1">🔒 <b>${esc(u.name)}</b>, ${esc(fmtDate(u.gesetzt_am))}${
+            u.firma_id !== S.profil.firma_id ? ' <i>(Partnerfirma)</i>' : ''}</div>
+          ${u.benutzer_id === S.profil.id || istErstellerfirma()
+            ? '<button class="btn small danger ber_unsign" style="flex:0 0 auto">Unterschrift entfernen</button>' : ''}
+        </div>`).join('')}
+        <div class="hint">Die <b>Mängel sind gesperrt</b> – auch auf dem Server. Entfernen kann die
+          unterzeichnende Person selbst oder die Firma, welche die Kontrolle angelegt hat; danach sind die
+          Mängel wieder bearbeitbar.</div>`
+      : `<div class="hint">Mit der Unterschrift werden die <b>Mängel gesperrt</b> (auch auf dem Server) und der
+          Bericht wird unveränderlich im Archiv abgelegt. Die übrige Kontrolle bleibt bearbeitbar.</div>`}
+      ${meineRollen.length && !(S.berichtU || []).some(u => u.benutzer_id === S.profil.id)
+        ? '<div class="btnrow"><button class="btn" id="btnBerSign">✍️ Bericht unterschreiben</button></div>' : ''}
+      <div id="behebungkarte"></div>
       <div class="btnrow">
         <button class="btn primary" id="btnBericht">⬇︎ Kontrollbericht erstellen</button>
         <button class="btn" id="btnBerichtMail">✉️ Bericht per Mail senden</button>
@@ -592,8 +636,10 @@ async function renderAbschluss() {
       <h3 style="margin-top:0">Unterschriften</h3>
       ${offeneRollen.length ? `<div class="hint">Hier unterschreibst du <b>in deinem eigenen Namen</b>.
         Hake an, in welcher Eigenschaft – beides zusammen ist möglich.${gesperrt
-          ? ' Die Kontrolle ist bereits unterschrieben und darum gesperrt; weitere Unterschriften bleiben trotzdem möglich.'
-          : ' Ab der ersten Unterschrift ist die Kontrolle gesperrt.'}</div>
+          ? ' Unterschriebene Anlagen sind gesperrt (Status «Unterschrieben», gelb), ebenso Kunde und Adressen; '
+            + 'weitere Unterschriften bleiben möglich.'
+          : ' Mit der Unterschrift werden die gewählten Anlagen gesperrt, ebenso Kunde und Adressen. '
+            + 'Nicht unterschriebene Anlagen bleiben bearbeitbar.'}</div>
       <label class="f" style="margin-top:10px">Welche Anlagen unterschreibst du?</label>
       <div class="chips" id="signAnlagen">
         ${alleAnlagen.map(a => `<label class="chip"><input type="checkbox" class="sign_a" value="${a.id}" checked
@@ -718,7 +764,7 @@ async function renderAbschluss() {
           .filter(Boolean).join('_').replace(/[\\/:*?"<>|]+/g, ' ');
         dateiSpeichern(name + '.csv', csvText(gruppen || [], !!S.csvKopf),
           'text/tab-separated-values;charset=utf-8');
-      } else {
+      } else if (!(await originalHolen(b.dataset.dok, aid))) {
         await dokumentErzeugen(b.dataset.dok, aid);
       }
     } catch (e) { fehler(e); }
@@ -729,6 +775,7 @@ async function renderAbschluss() {
   dokKnoepfeStand();
 
   dokListeZeichnen();
+  behebungKarteZeichnen();
   pruefkarteZeichnen();
   aufgabenAufraeumen();       // was sich von selbst erledigt hat, verschwindet
 
@@ -756,6 +803,69 @@ async function renderAbschluss() {
   $$('.ber_p').forEach(c => c.addEventListener('change', () => {
     k.kontrolleure = $$('.ber_p').filter(x => x.checked).map(x => x.value);
     feldSpeichern('kontrollen', k.id, 'kontrolleure', k.kontrolleure);
+  }));
+
+  // Bericht unterschreiben: eigene Zeile in `unterschriften` (dokument 'bericht') –
+  // der Server sperrt damit die Mängel (Nachtrag 17)
+  const berSign = $('#btnBerSign');
+  if (berSign) berSign.addEventListener('click', () => {
+    const setzen = async bild => {
+      if (!S.maengel) await maengelLaden();
+      const zeile = await zeileAnlegen('unterschriften', {
+        kontrolle_id: k.id, anlage_id: null, dokument: 'bericht', rolle: meineRollen[0],
+        firma_id: S.profil.firma_id, benutzer_id: S.profil.id,
+        name: S.profil.name || S.profil.kuerzel, bild,
+        pruefsumme: String(k.updated_at || ''), gesetzt_am: new Date().toISOString()
+      });
+      S.berichtU = (S.berichtU || []).concat(zeile);
+      paketNachfuehren();
+      renderAbschluss();
+      // Sofort ins Archiv – so bleibt genau diese Fassung belegt
+      if (!navigator.onLine) {
+        return alert('Unterschrift gespeichert. Ohne Verbindung konnte der Bericht nicht abgelegt werden – '
+          + 'hole das unter «Abgelegte Dokumente» nach, sobald du wieder Empfang hast.');
+      }
+      setSaveState('saving', '● Bericht wird abgelegt …');
+      try { await dokumentAblegen('kontrollbericht', null, 'unterschrift'); }
+      catch (e) {
+        protokollieren('Kontrollbericht nicht abgelegt', k.id, e);
+        alert('Die Unterschrift ist gespeichert, der Bericht konnte aber nicht abgelegt werden.');
+      }
+      setSaveState('saved', '✓ Gespeichert');
+      renderAbschluss();
+    };
+    if (S.profil.unterschrift
+        && confirm('Deine hinterlegte Unterschrift verwenden?\n\n«Abbrechen» = jetzt neu unterschreiben.')) {
+      return setzen(S.profil.unterschrift);
+    }
+    const box = document.createElement('div');
+    box.hidden = true;            // nur der Dialog soll sichtbar sein
+    document.body.appendChild(box);
+    unterschriftsFeld(box, null, async bild => {
+      box.remove();
+      if (!bild) return;
+      // Noch keine Unterschrift im Profil → gleich dort hinterlegen
+      if (!S.profil.unterschrift && navigator.onLine) {
+        const { error } = await sb.from('benutzer').update({ unterschrift: bild }).eq('id', S.profil.id);
+        if (!error) S.profil.unterschrift = bild;
+      }
+      await setzen(bild);
+    });
+    const knopf = box.querySelector('button');
+    if (knopf) knopf.click();
+  });
+  $$('.ber_unsign').forEach(b => b.addEventListener('click', async () => {
+    const u = (S.berichtU || []).find(x => x.id === b.closest('[data-buid]').dataset.buid);
+    if (!u || !confirm('Unterschrift von ' + u.name + ' unter dem Kontrollbericht entfernen?\n\n'
+      + 'Danach sind die Mängel wieder bearbeitbar. Der abgelegte Bericht im Archiv bleibt erhalten.')) return;
+    await zeileLoeschen('unterschriften', u.id);
+    await auftragEinreihen({ art: 'insert', tabelle: 'unterschriften_log', werte: {
+      kontrolle_id: k.id, beschreibung: 'Unterschrift Kontrollbericht entfernt (' + u.name + ')',
+      entfernt_von: S.profil.id
+    } });
+    S.berichtU = S.berichtU.filter(x => x.id !== u.id);
+    paketNachfuehren();
+    renderAbschluss();
   }));
 
   const berichtWahl = () => {
@@ -815,8 +925,8 @@ async function renderAbschluss() {
     if (!confirm('Wirklich alle Unterschriften entfernen?\n\nDanach ist die Kontrolle wieder bearbeitbar '
       + 'und alle Beteiligten müssen neu unterschreiben.')) return;
     const namen = S.unterschriften.map(u => u.name).join(', ');
-    await auftragEinreihen({ art: 'delete_wo', tabelle: 'unterschriften',
-      spalte: 'kontrolle_id', wert: S.kontrolle.id });
+    // Einzeln löschen: die Bericht-Unterschrift bleibt stehen (eigene Sperre der Mängel)
+    for (const u of S.unterschriften) await zeileLoeschen('unterschriften', u.id);
     await auftragEinreihen({ art: 'insert', tabelle: 'unterschriften_log', werte: {
       kontrolle_id: S.kontrolle.id,
       beschreibung: 'Unterschriften entfernt (' + namen + ')',
@@ -907,6 +1017,7 @@ async function unterschreiben() {
   }
   // Neu zeichnen – der Dialog steckt im Unterschriftsfeld
   const box = document.createElement('div');
+  box.hidden = true;              // nur der Dialog soll sichtbar sein
   document.body.appendChild(box);
   unterschriftsFeld(box, null, async bild => {
     box.remove();
@@ -1098,6 +1209,25 @@ async function dokumenteLaden(neu) {
   return S.dokumente;
 }
 
+/* Unterschriebene Anlage: SiNa/MPP so liefern, wie sie unterschrieben wurden –
+   aus dem Archiv. Neu erzeugt kämen die HEUTIGEN Firmenangaben hinein
+   (Adresse, Bewilligungsnummer), und das Dokument wiche vom Unterschriebenen ab.
+   Gibt false zurück, wenn es kein Original gibt (dann wird neu erzeugt). */
+async function originalHolen(art, anlageId) {
+  if (!anlageUnterzeichnet(anlageId) || !navigator.onLine) return false;
+  const arten = art === 'sina' ? ['sina'] : ['mpp', 'pv_mpp'];
+  const d = (await dokumenteLaden(true))
+    .filter(x => x.anlage_id === anlageId && arten.includes(x.art))
+    .sort((x, y) => (y.version || 0) - (x.version || 0))[0];
+  if (!d) {
+    alert('Zu dieser Anlage ist kein unterschriebenes Original im Archiv. Das PDF wird darum neu erzeugt – '
+      + 'Firmenangaben stammen dann aus den heutigen Optionen.\n\nTipp: unter «Abgelegte Dokumente» nachholen.');
+    return false;
+  }
+  await dokumentHolen(d);
+  return true;
+}
+
 // Ein abgelegtes Dokument herunterladen
 async function dokumentHolen(d) {
   const { data, error } = await sb.storage.from('dokumente').download(d.pfad);
@@ -1107,6 +1237,132 @@ async function dokumentHolen(d) {
   a.href = url; a.download = d.dateiname || 'dokument.pdf';
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+/* ============================================================
+   Link für die Mängelbehebung (Etappe L)
+   Ein Eintrag pro Kontrolle in «behebungen». Er entsteht von selbst, sobald
+   der Kontrollbericht unterschrieben ist. Der Installateur öffnet ihn ohne
+   Konto im Ordner behebung/ – siehe supabase/functions/behebung.
+   ============================================================ */
+
+S.behebung = null;
+
+function behebungLink(b) {
+  return new URL('behebung/', location.href.split('#')[0]).href + '#k=' + b.code;
+}
+
+function qrSvg(text, zelle) {
+  if (typeof qrcode !== 'function') return '';
+  const qr = qrcode(0, 'M');
+  qr.addData(text);
+  qr.make();
+  return qr.createSvgTag(zelle || 4, 2);
+}
+
+async function behebungKarteZeichnen() {
+  const box = $('#behebungkarte');
+  if (!box) return;
+  const k = S.kontrolle;
+  const titel = '<label class="f" style="margin-top:14px">🔗 Link für die Mängelbehebung</label>';
+  if (!berichtGesperrt()) {
+    box.innerHTML = titel + '<div class="hint">Sobald der Kontrollbericht unterschrieben ist, entsteht hier ein Link '
+      + '(auch als QR-Code im PDF). Damit meldet der Installateur die Behebung – ohne Konto.</div>';
+    return;
+  }
+  if (!navigator.onLine) {
+    box.innerHTML = titel + '<div class="hint">⚡ Ohne Verbindung nicht verfügbar.</div>';
+    return;
+  }
+  box.innerHTML = titel + '<div class="hint">Wird geladen …</div>';
+  try {
+    let { data: b, error } = await sb.from('behebungen').select('*').eq('kontrolle_id', k.id).maybeSingle();
+    if (error) throw error;
+    if (!b && istErstellerfirma()) {
+      const r = await sb.rpc('behebung_anlegen', { k_id: k.id });
+      if (r.error) throw r.error;
+      b = r.data;
+    }
+    S.behebung = b || null;
+    if (!b) {
+      box.innerHTML = titel + '<div class="hint">Den Link verwaltet die Firma, welche die Kontrolle angelegt hat.</div>';
+      return;
+    }
+    const [{ data: rm }, { data: prot }] = await Promise.all([
+      sb.from('rueckmeldungen').select('mangel_id, status').eq('kontrolle_id', k.id),
+      sb.from('behebung_protokoll').select('zeit, aktion').eq('behebung_id', b.id)
+        .order('zeit', { ascending: false }).limit(10)
+    ]);
+    if (!S.maengel) await maengelLaden();
+    const maengel = (S.maengel || []).filter(m => (m.typ || 'mangel') === 'mangel');
+    const beantwortet = maengel.filter(m => (rm || []).some(r => r.mangel_id === m.id && r.status)).length;
+    const abgelaufen = new Date(b.gueltig_bis).getTime() < Date.now();
+    const link = behebungLink(b);
+    const darf = istErstellerfirma();
+    const aktionText = {
+      laden: 'geöffnet', rueckmeldung: 'Rückmeldung gespeichert', foto_hochladen: 'Foto hinzugefügt',
+      foto_entfernen: 'Foto entfernt', neuer_code: 'neuer Link erstellt', unterschreiben: 'unterschrieben',
+      unterschrift_loeschen: 'Unterschrift gelöscht', code_senden: 'Mail-Code angefordert'
+    };
+
+    box.innerHTML = titel + `
+      ${b.unterschrieben_am
+        ? `<div class="hint" style="color:var(--ok)">✅ <b>Behebung unterschrieben</b> von ${esc(b.bearbeiter_name)}
+            (${esc(b.bearbeiter_mail)}, per Mail bestätigt) am ${esc(fmtDate(b.unterschrieben_am))}.</div>`
+        : `<div class="hint">${maengel.length
+            ? `Rückmeldungen: <b>${beantwortet} von ${maengel.length}</b> Mängeln beantwortet.`
+            : 'Keine Mängel im Bericht.'}</div>`}
+      <div class="hint">${b.widerrufen_am
+          ? '<span style="color:var(--danger)">⛔ Widerrufen</span> – der Link funktioniert nicht mehr.'
+          : abgelaufen ? '<span style="color:var(--danger)">⛔ Abgelaufen</span> am ' + esc(dat(new Date(b.gueltig_bis)))
+          : 'Gültig bis <b>' + esc(dat(new Date(b.gueltig_bis))) + '</b>.'}</div>
+      ${!b.widerrufen_am && !abgelaufen ? `
+        <div class="row" style="align-items:center;margin-top:6px">
+          <input type="text" readonly value="${esc(link)}" id="beh_link" style="font-size:13px">
+          <div class="narrow" style="flex:0 0 auto"><button class="btn small" id="beh_kopie">📋 Kopieren</button></div>
+          <div class="narrow" style="flex:0 0 auto"><button class="btn small" id="beh_qr">🔳 QR-Code</button></div>
+        </div>
+        <div id="beh_qrbox" hidden style="margin-top:8px;max-width:220px">${qrSvg(link, 4)}</div>` : ''}
+      ${darf ? `<div class="btnrow">
+          ${!b.widerrufen_am ? '<button class="btn small" id="beh_verl">⏩ Um 180 Tage verlängern</button>' : ''}
+          ${!b.widerrufen_am ? '<button class="btn small danger" id="beh_widerruf">⛔ Widerrufen</button>' : ''}
+          <button class="btn small" id="beh_neu">🔄 Neuer Link</button>
+        </div>` : ''}
+      ${(prot || []).length ? `<details style="margin-top:6px"><summary class="hint" style="cursor:pointer">
+          Zugriffe (letzte ${prot.length})</summary><div class="hint">${prot.map(p =>
+            esc(fmtDate(p.zeit)) + ' – ' + esc(aktionText[p.aktion] || p.aktion)).join('<br>')}</div></details>` : ''}`;
+
+    const an = (id, fn) => { const el = $('#' + id); if (el) el.addEventListener('click', fn); };
+    an('beh_kopie', async () => {
+      const ok = await inZwischenablage(link);
+      $('#beh_kopie').textContent = ok ? '✓ Kopiert!' : 'Nicht möglich';
+      setTimeout(() => { const el = $('#beh_kopie'); if (el) el.textContent = '📋 Kopieren'; }, 1500);
+    });
+    an('beh_qr', () => { const q = $('#beh_qrbox'); q.hidden = !q.hidden; });
+    const aendern = async (werte, frage) => {
+      if (frage && !confirm(frage)) return;
+      const { error: e } = await sb.from('behebungen').update(werte).eq('id', b.id);
+      if (e) return fehler(e);
+      behebungKarteZeichnen();
+    };
+    an('beh_verl', () => aendern({
+      gueltig_bis: new Date(Math.max(Date.now(), new Date(b.gueltig_bis).getTime()) + 180 * 864e5).toISOString()
+    }));
+    an('beh_widerruf', () => aendern({ widerrufen_am: new Date().toISOString() },
+      'Link widerrufen?\n\nDer Installateur kann ihn danach nicht mehr öffnen. Seine Rückmeldungen bleiben '
+      + 'erhalten. Mit «Neuer Link» lässt sich jederzeit ein neuer erstellen.'));
+    an('beh_neu', async () => {
+      if (!confirm('Einen neuen Link erstellen?\n\nDer bisherige Link (und der QR-Code in bereits verschickten '
+        + 'PDFs) funktioniert danach NICHT mehr. Rückmeldungen und Unterschrift bleiben erhalten.')) return;
+      const { error: e } = await sb.rpc('behebung_neuer_code', { b_id: b.id });
+      if (e) return fehler(e);
+      behebungKarteZeichnen();
+    });
+  } catch (e) {
+    box.innerHTML = titel + '<div class="hint" style="color:var(--danger)">Der Link konnte nicht geladen werden: '
+      + esc(e.message || e) + '</div>';
+    protokollieren('Behebungs-Link nicht geladen', k.id, e);
+  }
 }
 
 /* Die Liste im Reiter Abschluss. Zeigt auch, was noch fehlt: eine
@@ -1332,8 +1588,11 @@ async function berichtPdf(wahl) {
     : ((S.unterschriften || []).length
       ? S.unterschriften.map(u => ({ name: u.name, tel: '', mail: '' }))
       : [{ name: S.profil.name || S.profil.kuerzel, tel: S.profil.telefon, mail: S.profil.mail }]);
-  // Unterschrieben wird immer persönlich – die Bilder kommen aus den Unterschriften
-  const unterzeichner = (S.unterschriften || []).length
+  // Unterschrieben wird immer persönlich. Ist der Bericht selbst unterschrieben
+  // (Abschluss → «Bericht unterschreiben»), stehen nur diese Unterschriften drin,
+  // sonst die Bilder aus den SiNa/MPP-Unterschriften.
+  const unterzeichner = (S.berichtU || []).length ? S.berichtU.map(u => ({ name: u.name, bild: u.bild }))
+    : (S.unterschriften || []).length
     ? S.unterschriften.map(u => ({ name: u.name, bild: u.bild }))
     : [];
 
@@ -1505,7 +1764,7 @@ async function berichtPdf(wahl) {
         const p = doc.getImageProperties(b);
         const h = 14, w = Math.min(h * p.width / p.height, 40);
         if (bx + w > W - M) break;
-        doc.addImage(b, bildArt(b), bx, y + 7, w, h);
+        doc.addImage(b, bildArt(b), bx, y + 7, w, h, undefined, 'FAST');   // ohne FAST: 2 MB pro Unterschrift
         bx += w + 4;
       } catch (e) { /* Bild nicht lesbar – dann nur der Name */ }
     }
@@ -2073,7 +2332,7 @@ function mppBloecke(W, doc, M, a, abgehakt, eig, f, bew, wirInstallateur, sichtL
       .find(z => z.rolle === 'kontrollberechtigt' && (z.anlage_id === a.id || !z.anlage_id));
     W.label(X1, yy, 'Datum'); W.wert(X1 + 34, yy, u ? heute : '');
     W.label(X1, yy + ZH, 'Kontrollberechtigter');
-    if (u && u.bild) { try { doc.addImage(u.bild, 'PNG', X1, yy + 18, 100, 32); } catch (e) { /* Bild nicht lesbar */ } }
+    if (u && u.bild) { try { doc.addImage(u.bild, 'PNG', X1, yy + 18, 100, 32, undefined, 'FAST'); } catch (e) { /* Bild nicht lesbar */ } }
     W.wert(X1, yy + 52, u ? u.name : '');
     W.line(X1, yy + 56, X1 + 200, yy + 56, 0.3);
     W.txt(X1, yy + 63, 'Vorname Name (Blockschrift)', 5, false, true);
@@ -2544,7 +2803,7 @@ function sinaPdf(a, gruppen) {
     label(x, yy, 'Datum'); wert(x + 34, yy, u ? heute : '');
     label(x, yy + ZH, rolle === 'kontrollberechtigt' ? 'Kontrollberechtigter' : 'Unterschriftsberechtigter');
     if (u && u.bild) {
-      try { doc.addImage(u.bild, 'PNG', x, yy + 20, 100, 34); } catch (e) { /* Bild nicht lesbar */ }
+      try { doc.addImage(u.bild, 'PNG', x, yy + 20, 100, 34, undefined, 'FAST'); } catch (e) { /* Bild nicht lesbar */ }
     }
     wert(x, yy + 58, u ? u.name : '');
     line(x, yy + 62, x + 118, yy + 62, 0.3);
@@ -2890,7 +3149,7 @@ async function paketJetztSchreiben() {
     if (S.maengel) p.maengel = S.maengel;
     if (S.arbeitszeit) p.arbeitszeit = S.arbeitszeit;
     if (S.statusVerlauf) p.status_verlauf = S.statusVerlauf;
-    if (S.unterschriften) p.unterschriften = S.unterschriften;
+    if (S.unterschriften) p.unterschriften = S.unterschriften.concat(S.berichtU || []);
     // Gruppen und Sichtkontrolle kennen wir nur für die gewählte Anlage –
     // darum nur deren Zeilen ersetzen, der Rest bleibt stehen.
     if (S.gruppen && S.anlageId) {
@@ -3061,7 +3320,7 @@ function ausPaketFuellen(p) {
   S.arbeitszeit = (p.arbeitszeit || []).slice();
   S.statusVerlauf = (p.status_verlauf || []).slice()
     .sort((a, b) => String(a.gesetzt_am).localeCompare(String(b.gesetzt_am)));
-  S.unterschriften = (p.unterschriften || []).slice();
+  unterschriftenVerteilen(p.unterschriften);
   S.gruppen = null;              // hängen an der gewählten Anlage
   S.sicht = null;
   S.anlageFirmen = null;         // gehören zur Kontrolle, neu laden
@@ -3788,13 +4047,15 @@ async function partnerBereich() {
 const STATUS_STUFEN = ['Erfasst', 'Gemessen', 'Geschrieben', 'Abgerechnet', 'Abgeschlossen'];
 
 /* Status je ANLAGE – zusätzlich zum Status der ganzen Kontrolle.
-   «Eröffnet» und «Gemessen» setzt man von Hand; «Abgeschlossen» ergibt sich
-   von selbst, sobald die Anlage unterschrieben ist. Die drei Zustände des
+   «Eröffnet» und «Gemessen» setzt man von Hand; «Unterschrieben» (gelb) ergibt
+   sich von selbst, sobald die Anlage unterschrieben ist – dann ist sie gesperrt.
+   «Abgeschlossen» bleibt nur für ältere Einträge in der Liste. Die drei Zustände des
    Verteilnetzbetreibers vergibt später der VNB (Etappe M) – sie werden hier
    schon angezeigt, damit nichts nachgerüstet werden muss. */
 const ANLAGE_STATUS = [
   { wert: 'eroeffnet',       text: 'Eröffnet',        zeichen: '●', hand: true },
   { wert: 'gemessen',        text: 'Gemessen',        zeichen: '◐', hand: true },
+  { wert: 'unterschrieben',  text: 'Unterschrieben',  zeichen: '🔒' },
   { wert: 'abgeschlossen',   text: 'Abgeschlossen',   zeichen: '✓' },
   { wert: 'beim_vnb',        text: 'Beim VNB',        zeichen: '➤' },
   { wert: 'genehmigt',       text: 'Von VN genehmigt', zeichen: '★' },
@@ -3802,15 +4063,15 @@ const ANLAGE_STATUS = [
 ];
 const VNB_STATUS = ['beim_vnb', 'genehmigt', 'zurueckgewiesen'];
 
-// Der geltende Status einer Anlage. «Abgeschlossen» wird nie gespeichert,
+// Der geltende Status einer Anlage. «Unterschrieben» wird nie gespeichert,
 // sondern aus den Unterschriften abgeleitet – so stimmt die Farbe auch dann
 // noch, wenn eine Unterschrift wieder entfernt wird.
 function anlageStatus(a) {
   if (!a) return 'eroeffnet';
   const s = a.status || 'eroeffnet';
   if (VNB_STATUS.includes(s)) return s;
-  if (anlageUnterzeichnet(a.id)) return 'abgeschlossen';
-  return s === 'abgeschlossen' ? 'gemessen' : s;
+  if (anlageUnterzeichnet(a.id)) return 'unterschrieben';
+  return (s === 'abgeschlossen' || s === 'unterschrieben') ? 'gemessen' : s;
 }
 
 const statusInfo = wert => ANLAGE_STATUS.find(s => s.wert === wert) || ANLAGE_STATUS[0];
@@ -3822,16 +4083,17 @@ function statusWahl(a) {
   const info = statusInfo(jetzt);
   if (!info.hand) {
     return `<div><span class="statusbadge st-${info.wert}">${info.zeichen} ${esc(info.text)}</span></div>
-      <div class="hint">${jetzt === 'abgeschlossen'
-        ? 'Automatisch gesetzt, weil diese Anlage unterschrieben ist. Werden die Unterschriften wieder '
-          + 'entfernt, steht sie erneut auf «Gemessen».'
+      <div class="hint">${jetzt === 'unterschrieben'
+        ? 'Automatisch gesetzt, weil diese Anlage unterschrieben ist. Sie bleibt, wie sie bei der Unterschrift '
+          + 'war – ansehen, PDFs und CSV gehen weiterhin. Werden die Unterschriften entfernt, steht sie erneut '
+          + 'auf «Gemessen» und ist wieder bearbeitbar.'
         : 'Diesen Status vergibt der Verteilnetzbetreiber.'}</div>`;
   }
   return `<div class="btnrow" id="a_status" style="margin:4px 0 0">
       ${ANLAGE_STATUS.filter(s => s.hand).map(s => `<button class="btn small statuswahl${s.wert === jetzt ? ' st-' + s.wert : ''}" data-st="${s.wert}">${s.zeichen} ${s.text}</button>`).join('')}
     </div>
     <div class="hint">Die Farbe der Anlage oben zeigt diesen Status – so siehst du in jedem Reiter sofort,
-      wo schon gemessen ist. <b>«Abgeschlossen» ✓ setzt sich von selbst</b>, sobald die Anlage
+      wo schon gemessen ist. <b>«Unterschrieben» 🔒 (gelb) setzt sich von selbst</b>, sobald die Anlage
       unterschrieben ist.</div>`;
 }
 
@@ -5002,7 +5264,7 @@ async function neueKontrolle(vorlage) {
   await auftragEinreihen({ art: 'insert', tabelle: 'kontrollen', werte: zeile });
   S.kontrolle = zeile;
   S.anlagen = []; S.anlageId = null; S.gruppen = null; S.maengel = [];
-  S.sicht = null; S.unterschriften = []; S.arbeitszeit = []; S.statusVerlauf = [];
+  S.sicht = null; S.unterschriften = []; S.berichtU = []; S.arbeitszeit = []; S.statusVerlauf = [];
   await paketJetztSchreiben();
   if (navigator.onLine) echtzeitStarten(zeile.id);
   go('kunde');
@@ -5182,9 +5444,10 @@ function aenderungEingetroffen(tabelle, nachricht) {
     const offenG = speicherWarteschlange.get('gruppen:' + neu.id) || {};
     Object.keys(neu).forEach(f => {
       if (f in offenG || !fremdGeaendert(f)) return;
-      const el = document.querySelector(`tr[data-gid="${neu.id}"] input[data-feld="${f}"]`);
+      const el = document.querySelector(`tr[data-gid="${neu.id}"] [data-feld="${f}"]`);
       if (el && el !== document.activeElement && el.value !== String(neu[f] ?? '')) {
         el.value = neu[f] ?? '';
+        if (el.tagName === 'TEXTAREA') hoeheAnpassen(el);
         el.classList.add('fremdaenderung');
         setTimeout(() => el.classList.remove('fremdaenderung'), 1500);
       }
@@ -5995,7 +6258,10 @@ async function renderMess() {
     return;
   }
 
-  v.innerHTML = `<h2>Messwerte erfassen</h2>${chips.html}
+  // Anlagen links (bei vielen seitlich schiebbar), «CSV kopieren» fest rechts daneben
+  v.innerHTML = `<h2>Messwerte erfassen</h2>
+    <div class="messkopf">${chips.html}
+      <button class="btn small" id="mess_csv">📋 CSV kopieren</button></div>
     <div class="hint">Gelbe Zeile = Zuleitung. Trägst du dort <b>IK Ende</b> ein, wird der Wert automatisch
       als <b>IK Anfang</b> in die Gruppen darunter übernommen (nur leere bzw. gleich gebliebene Felder).</div>
     <div class="tablewrap"><table class="mess">
@@ -6003,17 +6269,41 @@ async function renderMess() {
       <thead><tr>${MESS_SPALTEN.map(c => `<th class="${c.cls || ''}">${c.titel}</th>`).join('')}</tr></thead>
       <tbody>
         ${S.gruppen.map((g, i) => `<tr class="${i === 0 ? 'zuleitung' : ''}" data-gid="${g.id}">
-          ${MESS_SPALTEN.map(c => `<td class="${c.cls || ''}"><input type="text" ${c.num ? 'inputmode="decimal"' : ''}
+          ${MESS_SPALTEN.map(c => c.feld === 'bez'
+            // Bezeichnung bricht um, damit auch lange Texte ganz lesbar sind
+            ? `<td class="${c.cls || ''}"><textarea rows="1" data-feld="bez">${esc(g.bez)}</textarea></td>`
+            : `<td class="${c.cls || ''}"><input type="text" ${c.num ? 'inputmode="decimal"' : ''}
              data-feld="${c.feld}" value="${esc(g[c.feld])}"></td>`).join('')}
         </tr>`).join('')}
       </tbody></table></div>`;
   chips.wire();
+  const aktChip = v.querySelector('.messkopf .chip.active');
+  if (aktChip) aktChip.scrollIntoView({ block: 'nearest', inline: 'nearest' });
 
-  $$('table.mess input').forEach(inp => {
+  $('#mess_csv').addEventListener('click', async e => {
+    const b = e.currentTarget;
+    // S.gruppen ist der Stand im Gerät inkl. noch nicht gesendeter Werte – geht auch offline.
+    // Ohne Kopfzeile; wer sie braucht, nimmt den CSV-Download im Abschluss.
+    const ok = await inZwischenablage(csvText(S.gruppen, false));
+    if (!ok) return alert('Kopieren nicht möglich – nutze im Reiter 📤 Abschluss den CSV-Download.');
+    b.textContent = '✓ Kopiert!';
+    setTimeout(() => { b.textContent = '📋 CSV kopieren'; }, 1500);
+  });
+
+  $$('table.mess textarea[data-feld="bez"]').forEach(ta => {
+    hoeheAnpassen(ta);
+    ta.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); ta.blur(); } });
+  });
+
+  $$('table.mess input, table.mess textarea').forEach(inp => {
     const g = S.gruppen.find(x => x.id === inp.closest('tr').dataset.gid);
     const feld = inp.dataset.feld;
     inp.addEventListener('focus', () => inp.select && inp.select());
     inp.addEventListener('input', () => {
+      if (inp.tagName === 'TEXTAREA') {
+        if (/[\r\n]/.test(inp.value)) inp.value = inp.value.replace(/[\r\n]+/g, ' ');
+        hoeheAnpassen(inp);
+      }
       const alt = g[feld];
       g[feld] = inp.value;
       feldSpeichern('gruppen', g.id, feld, inp.value);
@@ -6022,6 +6312,36 @@ async function renderMess() {
       }
     });
   });
+}
+
+// Mehrzeiliges Feld so hoch wie sein Inhalt (Bezeichnung in der Messtabelle)
+function hoeheAnpassen(ta) {
+  ta.style.height = 'auto';
+  ta.style.height = ta.scrollHeight + 'px';
+}
+// iPad drehen = andere Spaltenbreite → Höhe der Bezeichnungen neu rechnen
+window.addEventListener('resize', () => {
+  document.querySelectorAll('table.mess textarea[data-feld="bez"]').forEach(hoeheAnpassen);
+});
+
+// Text in die Zwischenablage – mit Rückfall für ältere iPads
+async function inZwischenablage(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (e) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
+    document.body.appendChild(ta);
+    ta.select();
+    ta.setSelectionRange(0, text.length);
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch (e2) { ok = false; }
+    ta.remove();
+    return ok;
+  }
 }
 
 /* ============================================================
@@ -6790,7 +7110,7 @@ async function optGrund() {
       <button class="btn primary" id="g_save">Speichern</button>
       <button class="btn danger small" id="g_reset">Auf Standard zurücksetzen</button>
     </div>
-    <div class="hint" style="margin-top:12px">App-Version: <b>Online 3.11</b></div>
+    <div class="hint" style="margin-top:12px">App-Version: <b>Online 3.17</b></div>
   </div>`;
 
   // Ändern darf nur der Admin (die Datenbank lässt es ohnehin nur ihm zu)
@@ -7373,7 +7693,10 @@ function unterschriftsFeld(box, vorhanden, aufSpeichern) {
     ov.querySelector('#sig_clear').addEventListener('click', () => {
       ctx.clearRect(0, 0, cv.width, cv.height); leer = true;
     });
-    ov.querySelector('#sig_abbr').addEventListener('click', () => ov.remove());
+    ov.querySelector('#sig_abbr').addEventListener('click', () => {
+      ov.remove();
+      if (box.hidden) box.remove();   // Hilfsfeld aus dem Unterschreiben-Ablauf mit wegräumen
+    });
     ov.querySelector('#sig_ok').addEventListener('click', async () => {
       if (leer) return alert('Bitte zuerst unterschreiben.');
       vorhanden = cv.toDataURL('image/png');

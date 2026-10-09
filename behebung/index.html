@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#1b1e23">
+<title>Mängelbehebung</title>
+<link rel="apple-touch-icon" href="../icon-180.png">
+<link rel="stylesheet" href="behebung.css">
+</head>
+<body>
+
+<header id="kopf">
+  <div class="titel">⚡ Mängelbehebung</div>
+  <div id="speicherstand" class="stand"></div>
+</header>
+
+<div id="offline" class="banner warn" hidden>⚡ <b>Keine Verbindung.</b> Eingaben sind gesperrt, bis die
+  Verbindung zurück ist – sonst gingen sie verloren.</div>
+
+<main id="inhalt">
+  <div class="leer">Bericht wird geladen …</div>
+</main>
+
+<!-- Vollbild-Ansicht der Fotos -->
+<div id="bildansicht" hidden>
+  <div class="bv-leiste">
+    <span id="bv-zahl"></span>
+    <span id="bv-titel"></span>
+    <button id="bv-zu" aria-label="Schliessen">✕</button>
+  </div>
+  <div id="bv-buehne"><img id="bv-bild" alt=""></div>
+  <button id="bv-zurueck" class="bv-pfeil" aria-label="Vorheriges Foto">‹</button>
+  <button id="bv-weiter" class="bv-pfeil" aria-label="Nächstes Foto">›</button>
+</div>
+
+<script src="../config.js"></script>
+<script src="behebung.js"></script>
+</body>
+</html>
