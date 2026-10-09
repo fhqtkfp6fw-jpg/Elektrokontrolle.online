@@ -178,6 +178,8 @@ function zeichnen() {
         Kenntnis. Eine Bemerkung ist freiwillig.</div>${infosHtml}` : ''}
     ${unterschriftHtml()}`;
 
+  const cv = $('#signfeld');
+  if (cv) Z.feld = unterschriftsFeld(cv);
   fortschritt();
   sperreAnzeigen();
   linkTimerSetzen();
@@ -245,20 +247,194 @@ function fotosHtml(liste, gal, eigene) {
     </div>`).join('');
 }
 
+/* ---------- Unterschrift mit Mail-Code ----------
+   Schritt 1: Name + Mail → Code per Mail.  Schritt 2: Code + Unterschrift.
+   Löschen: Code an DIESELBE Adresse wie bei der Unterschrift. */
+
+Z.sign = null;          // { schritt: 1|2, name, mail, maskiert }
+Z.loeschen = null;      // { maskiert } – Code zum Löschen ist unterwegs
+
+function personLaden() {
+  try { return JSON.parse(localStorage.getItem('behebung-person') || '{}'); } catch (e) { return {}; }
+}
+function personMerken(name, mail) {
+  try { localStorage.setItem('behebung-person', JSON.stringify({ name, mail })); } catch (e) { /* egal */ }
+}
+
 function unterschriftHtml() {
   const d = Z.daten;
   if (d.unterschrift) {
     const u = d.unterschrift;
-    return `<div class="card"><h2 style="margin-top:0">Unterschrift</h2>
+    return `<div class="card" id="unterschrift"><h2 style="margin-top:0">Unterschrift</h2>
         ${u.bild ? `<img src="${esc(u.bild)}" alt="Unterschrift" style="max-width:260px;max-height:110px;display:block">` : ''}
-        <div><b>${esc(u.name)}</b> · ${esc(u.mail)} (per Mail bestätigt)</div>
-        <div class="hint">${esc(datum(u.am))}, ${esc(zeit(u.am))}</div></div>`;
+        <div><b>${esc(u.name)}</b> · ${esc(u.mail)} <span class="hint">(per Mail bestätigt)</span></div>
+        <div class="hint">${esc(datum(u.am))}, ${esc(zeit(u.am))}</div>
+        ${Z.loeschen ? `
+          <div class="banner info" style="margin-top:12px">Ein Code zum Löschen ging an <b>${esc(Z.loeschen.maskiert)}</b>
+            (gültig 10 Minuten).</div>
+          <input type="text" id="loeschcode" class="codefeld" inputmode="numeric" autocomplete="one-time-code"
+            maxlength="6" placeholder="6-stelliger Code">
+          <button class="btn voll" id="btnLoeschen" style="border-color:var(--danger);color:var(--danger)">
+            Unterschrift löschen</button>
+          <button class="btn voll" id="btnLoeschenAbbr">Abbrechen</button>`
+        : `<button class="btn voll" id="btnLoeschenStart">Unterschrift löschen …</button>
+           <div class="hint">Nur mit einem Code an dieselbe Mailadresse. Danach sind die Rückmeldungen wieder
+             bearbeitbar.</div>`}
+        <div class="banner fehler" id="signfehler" hidden style="margin-top:10px"></div></div>`;
+  }
+  const p = Z.sign || Object.assign({ schritt: 1 }, personLaden());
+  if (p.schritt === 2) {
+    return `<div class="card" id="unterschrift"><h2 style="margin-top:0">Unterschreiben</h2>
+        <div class="banner info">Der Code ging an <b>${esc(p.maskiert)}</b> – er gilt 10 Minuten.
+          Keine Mail? Auch im Spam-Ordner nachsehen.</div>
+        <div class="lbl">Code aus der Mail</div>
+        <input type="text" id="signcode" class="codefeld" inputmode="numeric" autocomplete="one-time-code"
+          maxlength="6" placeholder="123456">
+        <div class="lbl" style="margin-top:12px">Unterschrift – mit dem Finger ins Feld</div>
+        <canvas id="signfeld" class="signfeld"></canvas>
+        <button class="btn" id="signleeren" style="min-height:40px;margin-top:6px">Nochmals</button>
+        <div class="hint" style="margin-top:10px">Mit der Unterschrift bestätige ich, <b>${esc(p.name)}</b>, die
+          Rückmeldungen zu allen Positionen dieses Kontrollberichts. Danach sind sie gesperrt.</div>
+        <button class="btn primary voll" id="btnUnterschreiben">✍️ Verbindlich unterschreiben</button>
+        <div class="zeile" style="margin-top:4px">
+          <button class="btn" id="btnCodeNeu" style="flex:1">Neuer Code</button>
+          <button class="btn" id="btnAndereMail" style="flex:1">Andere Adresse</button>
+        </div>
+        <div class="banner fehler" id="signfehler" hidden style="margin-top:10px"></div></div>`;
   }
   return `<div class="card" id="unterschrift"><h2 style="margin-top:0">Unterschreiben</h2>
       <div class="hint">Wenn alle Mängel beantwortet sind, unterschreibst du hier. Zur Bestätigung bekommst du
         einen Code per Mail. Danach sind deine Rückmeldungen gesperrt.</div>
-      <button class="btn primary voll" id="btnSign" disabled>✍️ Mängelbehebung unterschreiben</button>
-      <div class="hint" id="signhinweis" style="margin-top:6px"></div></div>`;
+      <div class="lbl" style="margin-top:10px">Vor- und Nachname</div>
+      <input type="text" id="signname" class="feld" autocomplete="name" value="${esc(p.name || '')}">
+      <div class="lbl" style="margin-top:10px">Mailadresse</div>
+      <input type="email" id="signmail" class="feld" autocomplete="email" inputmode="email" autocapitalize="none"
+        value="${esc(p.mail || '')}">
+      <button class="btn primary voll" id="btnCode" disabled>📧 Code per Mail senden</button>
+      <div class="hint" id="signhinweis" style="margin-top:6px"></div>
+      <div class="banner fehler" id="signfehler" hidden style="margin-top:10px"></div></div>`;
+}
+
+function signKarteNeu() {
+  const alt = $('#unterschrift');
+  if (!alt) return;
+  alt.outerHTML = unterschriftHtml();
+  const cv = $('#signfeld');
+  if (cv) Z.feld = unterschriftsFeld(cv);
+  fortschritt();
+}
+
+function signFehler(text) {
+  const el = $('#signfehler');
+  if (!el) return alert(text);
+  el.hidden = !text;
+  el.textContent = text || '';
+}
+
+// Zeichenfeld: Finger oder Stift; benutzt man den Stift, zählt der Handballen nicht
+function unterschriftsFeld(cv) {
+  const skala = window.devicePixelRatio || 1;
+  const r = cv.getBoundingClientRect();
+  cv.width = r.width * skala; cv.height = r.height * skala;
+  const ctx = cv.getContext('2d');
+  ctx.scale(skala, skala);
+  ctx.lineWidth = 2.4; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.strokeStyle = '#111';
+  let leer = true, zeichnet = false, stift = false;
+  const pos = e => { const b = cv.getBoundingClientRect(); return [e.clientX - b.left, e.clientY - b.top]; };
+  cv.addEventListener('pointerdown', e => {
+    if (e.pointerType === 'pen') stift = true;
+    if (stift && e.pointerType !== 'pen') return;
+    zeichnet = true; leer = false;
+    try { cv.setPointerCapture(e.pointerId); } catch (x) { /* egal */ }
+    const [x, y] = pos(e); ctx.beginPath(); ctx.moveTo(x, y);
+    e.preventDefault();
+  });
+  cv.addEventListener('pointermove', e => {
+    if (!zeichnet || (stift && e.pointerType !== 'pen')) return;
+    const [x, y] = pos(e); ctx.lineTo(x, y); ctx.stroke();
+    e.preventDefault();
+  });
+  ['pointerup', 'pointercancel', 'pointerleave'].forEach(t => cv.addEventListener(t, () => { zeichnet = false; }));
+  return {
+    leer: () => leer,
+    leeren: () => { ctx.clearRect(0, 0, cv.width, cv.height); leer = true; },
+    bild: () => cv.toDataURL('image/png')
+  };
+}
+
+async function mitKnopf(knopf, text, arbeit) {
+  const alt = knopf.textContent;
+  knopf.disabled = true;
+  knopf.textContent = text;
+  signFehler('');
+  try { await arbeit(); }
+  catch (e) {
+    signFehler(e.message);
+    if (['unterschrieben', 'ueberarbeitung', 'ungueltig', 'widerrufen', 'abgelaufen'].includes(e.art)) nachFehler(e);
+  }
+  if (document.body.contains(knopf)) { knopf.disabled = false; knopf.textContent = alt; }
+}
+
+async function codeAnfordern(knopf) {
+  const name = Z.sign ? Z.sign.name : ($('#signname').value || '').trim();
+  const mail = Z.sign ? Z.sign.mail : ($('#signmail').value || '').trim().toLowerCase();
+  if (!name) return signFehler('Bitte Vor- und Nachname eingeben.');
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(mail)) return signFehler('Bitte eine gültige Mailadresse eingeben.');
+  await mitKnopf(knopf, '⏳ wird gesendet …', async () => {
+    const r = await rufen('code_senden', { zweck: 'unterschreiben', mail });
+    personMerken(name, mail);
+    Z.sign = { schritt: 2, name, mail, maskiert: r.mail };
+    signKarteNeu();
+    const f = $('#signcode'); if (f) f.focus();
+  });
+}
+
+function signKlick(t) {
+  const knopf = t.closest('button');
+  if (!knopf || !knopf.id) return false;
+  switch (knopf.id) {
+    case 'btnCode':
+    case 'btnCodeNeu':
+      codeAnfordern(knopf); return true;
+    case 'btnAndereMail':
+      Z.sign = null; signKarteNeu(); return true;      // Name/Mail stehen wieder vorausgefüllt da
+    case 'signleeren':
+      if (Z.feld) Z.feld.leeren(); return true;
+    case 'btnUnterschreiben': {
+      const code = ($('#signcode').value || '').trim();
+      if (!/^\d{6}$/.test(code)) { signFehler('Bitte den 6-stelligen Code aus der Mail eingeben.'); return true; }
+      if (!Z.feld || Z.feld.leer()) { signFehler('Bitte im Feld unterschreiben.'); return true; }
+      mitKnopf(knopf, '⏳ wird unterschrieben …', async () => {
+        await rufen('unterschreiben', { name: Z.sign.name, mail: Z.sign.mail, code, bild: Z.feld.bild() });
+        Z.sign = null;
+        await laden();
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      });
+      return true;
+    }
+    case 'btnLoeschenStart':
+      if (!confirm('Deine Unterschrift löschen?\n\nDazu schicken wir einen Code an die Mailadresse, mit der '
+        + 'du unterschrieben hast. Danach sind die Rückmeldungen wieder bearbeitbar.')) return true;
+      mitKnopf(knopf, '⏳ wird gesendet …', async () => {
+        const r = await rufen('code_senden', { zweck: 'loeschen' });
+        Z.loeschen = { maskiert: r.mail };
+        signKarteNeu();
+      });
+      return true;
+    case 'btnLoeschenAbbr':
+      Z.loeschen = null; signKarteNeu(); return true;
+    case 'btnLoeschen': {
+      const code = ($('#loeschcode').value || '').trim();
+      if (!/^\d{6}$/.test(code)) { signFehler('Bitte den 6-stelligen Code aus der Mail eingeben.'); return true; }
+      mitKnopf(knopf, '⏳ wird gelöscht …', async () => {
+        await rufen('unterschrift_loeschen', { code });
+        Z.loeschen = null;
+        await laden();
+      });
+      return true;
+    }
+  }
+  return false;
 }
 
 function fortschritt() {
@@ -271,12 +447,16 @@ function fortschritt() {
       ? '✓ alle ' + maengel.length + ' beantwortet'
       : fertig + ' von ' + maengel.length + ' beantwortet';
   }
-  const b = $('#btnSign');
+  const b = $('#btnCode');
   if (b) {
     b.disabled = fertig < maengel.length || gesperrt();
     $('#signhinweis').textContent = fertig < maengel.length
-      ? 'Noch ' + (maengel.length - fertig) + ' Mangel/Mängel ohne ✓ oder ✗.' : '';
+      ? 'Noch ' + (maengel.length - fertig) + (maengel.length - fertig === 1 ? ' Mangel' : ' Mängel') + ' ohne ✓ oder ✗.'
+      : '';
   }
+  ['btnUnterschreiben', 'btnCodeNeu', 'btnLoeschenStart', 'btnLoeschen'].forEach(id => {
+    const k = $('#' + id); if (k) k.disabled = !navigator.onLine;
+  });
 }
 
 function sperreAnzeigen() {
@@ -466,10 +646,7 @@ document.addEventListener('click', e => {
     return;
   }
 
-  if (t.closest('#btnSign')) {
-    alert('Die Unterschrift mit Bestätigung per Mail wird gerade eingerichtet. Deine Rückmeldungen sind '
-      + 'gespeichert – du kannst den Link später wieder öffnen und dann unterschreiben.');
-  }
+  if (t.closest('#unterschrift')) signKlick(t);
 });
 
 document.addEventListener('keydown', e => {
