@@ -1329,6 +1329,38 @@ function behebungsBlock(doc, link, gueltigBis, x, y, breite, hoehe) {
   doc.setTextColor(0);
 }
 
+/* Daten fürs PDF «Mängelbehebung» – im selben Aufbau, wie ihn die Edge Function der
+   Behebungs-App liefert (siehe behebungspdf.js), aber direkt aus der eigenen Datenbank:
+   so geht es auch, wenn der Link widerrufen oder abgelaufen ist. */
+async function behebungsDatenAusApp(b) {
+  const k = S.kontrolle, f = S.firma || {}, eig = k.eig || {};
+  if (!S.maengel) await maengelLaden();
+  const { data: rm, error } = await sb.from('rueckmeldungen')
+    .select('mangel_id, status, text, fotos, geaendert_am').eq('kontrolle_id', k.id);
+  if (error) throw error;
+  const team = await teamLaden();
+  const ids = (k.kontrolleure || []).length ? k.kontrolleure : (S.berichtU || []).map(u => u.benutzer_id);
+  const mitPfad = liste => (liste || []).map(pfad => ({ pfad, url: '' }));
+  return {
+    kopf: { strasse: (k.strasse + ' ' + k.hausnr).trim(), plz: k.plz, ort: k.ort,
+            auftrag_nr: k.auftrag_nr, auftrag_bez: k.auftrag_bez,
+            eigentuemer: { name: eig.name, name2: eig.name2, strasse: eig.strasse, plz: eig.plz, ort: eig.ort } },
+    firma: { name: f.name, telefon: f.telefon },
+    kontrolleure: ids.map(id => (team || []).find(p => p.id === id)).filter(Boolean)
+      .map(p => ({ name: p.name || p.kuerzel, telefon: p.telefon || '', mail: p.mail || '' })),
+    bericht_unterschriften: (S.berichtU || []).map(u => ({ name: u.name, am: u.gesetzt_am })),
+    anlagen: (S.anlagen || []).map(a => ({ id: a.id, name: a.name, zaehler_nr: a.zaehler_nr })),
+    positionen: (S.maengel || []).filter(m => (m.typ || 'mangel') !== 'notiz')       // nie die internen Notizen
+      .map(m => ({ id: m.id, anlage_id: m.anlage_id, typ: m.typ || 'mangel', ort: m.ort, text: m.text,
+                   fotos: mitPfad(m.fotos) })),
+    rueckmeldungen: (rm || []).map(r => Object.assign({}, r, { fotos: mitPfad(r.fotos) })),
+    unterschrift: b.unterschrieben_am
+      ? { name: b.bearbeiter_name, firma: b.bearbeiter_firma, mail: b.bearbeiter_mail,
+          am: b.unterschrieben_am, pruefsumme: b.pruefsumme }
+      : null
+  };
+}
+
 async function behebungKarteZeichnen() {
   const box = $('#behebungkarte');
   if (!box) return;
@@ -1394,6 +1426,7 @@ async function behebungKarteZeichnen() {
           <div class="narrow" style="flex:0 0 auto"><button class="btn small" id="beh_qr">🔳 QR-Code</button></div>
         </div>
         <div id="beh_qrbox" hidden style="margin-top:8px;max-width:220px">${qrSvg(link, 4)}</div>` : ''}
+      <div class="btnrow"><button class="btn small" id="beh_pdf">📄 Bericht mit Mängelbehebung (PDF)</button></div>
       ${darf ? `<div class="btnrow">
           ${!b.widerrufen_am ? '<button class="btn small" id="beh_verl">⏩ Um 180 Tage verlängern</button>' : ''}
           ${!b.widerrufen_am ? '<button class="btn small danger" id="beh_widerruf">⛔ Widerrufen</button>' : ''}
@@ -1411,6 +1444,17 @@ async function behebungKarteZeichnen() {
       setTimeout(() => { const el = $('#beh_kopie'); if (el) el.textContent = '📋 Kopieren'; }, 1500);
     });
     an('beh_qr', () => { const q = $('#beh_qrbox'); q.hidden = !q.hidden; });
+    an('beh_pdf', async () => {
+      const knopf = $('#beh_pdf');
+      knopf.disabled = true; knopf.textContent = '⏳ PDF wird erstellt …';
+      try {
+        const daten = await behebungsDatenAusApp(b);
+        behebungsPdfSpeichern(await behebungsPdf(daten, {
+          fotoLaden: async f => { const u = await fotoDatenUrl(f.pfad); return u ? behebungsPdfVerkleinern(u) : null; }
+        }));
+      } catch (e) { fehler(e); }
+      knopf.disabled = false; knopf.textContent = '📄 Bericht mit Mängelbehebung (PDF)';
+    });
     const aendern = async (werte, frage) => {
       if (frage && !confirm(frage)) return;
       const { error: e } = await sb.from('behebungen').update(werte).eq('id', b.id);
@@ -7193,7 +7237,7 @@ async function optGrund() {
       <button class="btn primary" id="g_save">Speichern</button>
       <button class="btn danger small" id="g_reset">Auf Standard zurücksetzen</button>
     </div>
-    <div class="hint" style="margin-top:12px">App-Version: <b>Online 3.20</b></div>
+    <div class="hint" style="margin-top:12px">App-Version: <b>Online 3.21</b></div>
   </div>`;
 
   // Ändern darf nur der Admin (die Datenbank lässt es ohnehin nur ihm zu)

@@ -1,8 +1,8 @@
 'use strict';
 
-const CACHE = 'nivonline-v52';
+const CACHE = 'nivonline-v53';
 const ASSETS = ['./', './index.html', './app.css', './app.js', './config.js',
-                './supabase.js', './jspdf.min.js', './qrcode.min.js', './manifest.webmanifest',
+                './supabase.js', './jspdf.min.js', './qrcode.min.js', './behebungspdf.js', './manifest.webmanifest',
                 './icon-180.png', './icon-512.png'];
 
 self.addEventListener('install', e => {

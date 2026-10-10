@@ -177,10 +177,12 @@ function zeichnen() {
     ${nr ? `<h2>Mängel</h2>${maengelHtml}` : '<div class="card">Im Bericht sind keine Mängel aufgeführt.</div>'}
     ${infosHtml ? `<h2>Informationen</h2><div class="hint" style="margin:-4px 0 8px">Keine Mängel – nur zur
         Kenntnis. Eine Bemerkung ist freiwillig.</div>${infosHtml}` : ''}
+    <div class="card"><h2 style="margin-top:0">Bericht als PDF</h2>
+      <div class="hint">Kontrollbericht mit allen Rückmeldungen, Haken und Fotos.${u ? ''
+        : ' Solange nicht bestätigt ist, steht «Entwurf» darauf.'}</div>
+      <button class="btn voll" id="btnPdf">📄 PDF herunterladen</button></div>
     ${unterschriftHtml()}`;
 
-  const cv = $('#signfeld');
-  if (cv) Z.feld = unterschriftsFeld(cv);
   fortschritt();
   sperreAnzeigen();
   linkTimerSetzen();
@@ -267,8 +269,7 @@ function unterschriftHtml() {
   if (d.unterschrift) {
     const u = d.unterschrift;
     return `<div class="card" id="unterschrift"><h2 style="margin-top:0">Unterschrift</h2>
-        ${u.bild ? `<img src="${esc(u.bild)}" alt="Unterschrift" style="max-width:260px;max-height:110px;display:block">` : ''}
-        <div><b>${esc(u.name)}</b>${u.firma ? ', ' + esc(u.firma) : ''}</div>
+        <div>✅ <b>${esc(u.name)}</b>${u.firma ? ', ' + esc(u.firma) : ''}</div>
         <div>${esc(u.mail)} <span class="hint">(per Mail bestätigt)</span></div>
         <div class="hint">${esc(datum(u.am))}, ${esc(zeit(u.am))}</div>
         ${Z.loeschen ? `
@@ -286,28 +287,25 @@ function unterschriftHtml() {
   }
   const p = Z.sign || Object.assign({ schritt: 1 }, personLaden());
   if (p.schritt === 2) {
-    return `<div class="card" id="unterschrift"><h2 style="margin-top:0">Unterschreiben</h2>
+    return `<div class="card" id="unterschrift"><h2 style="margin-top:0">Bestätigen</h2>
         <div class="banner info">Der Code ging an <b>${esc(p.maskiert)}</b> – er gilt 10 Minuten.
           Keine Mail? Auch im Spam-Ordner nachsehen.</div>
         <div class="lbl">Code aus der Mail</div>
         <input type="text" id="signcode" class="codefeld" inputmode="numeric" autocomplete="one-time-code"
           maxlength="6" placeholder="123456">
-        <div class="lbl" style="margin-top:12px">Unterschrift – mit dem Finger ins Feld</div>
-        <canvas id="signfeld" class="signfeld"></canvas>
-        <button class="btn" id="signleeren" style="min-height:40px;margin-top:6px">Nochmals</button>
-        <div class="hint" style="margin-top:10px">Mit der Unterschrift bestätige ich, <b>${esc(p.name)}</b>
-          (${esc(p.firma)}), die
-          Rückmeldungen zu allen Positionen dieses Kontrollberichts. Danach sind sie gesperrt.</div>
-        <button class="btn primary voll" id="btnUnterschreiben">✍️ Verbindlich unterschreiben</button>
+        <div class="hint" style="margin-top:10px">Mit der Eingabe des Codes bestätige ich, <b>${esc(p.name)}</b>
+          (${esc(p.firma)}), die Rückmeldungen zu allen Positionen dieses Kontrollberichts. Die bestätigte
+          Mailadresse gilt als Unterschrift. Danach sind die Rückmeldungen gesperrt.</div>
+        <button class="btn primary voll" id="btnUnterschreiben">✅ Verbindlich bestätigen</button>
         <div class="zeile" style="margin-top:4px">
           <button class="btn" id="btnCodeNeu" style="flex:1">Neuer Code</button>
           <button class="btn" id="btnAndereMail" style="flex:1">Andere Adresse</button>
         </div>
         <div class="banner fehler" id="signfehler" hidden style="margin-top:10px"></div></div>`;
   }
-  return `<div class="card" id="unterschrift"><h2 style="margin-top:0">Unterschreiben</h2>
-      <div class="hint">Wenn alle Mängel beantwortet sind, unterschreibst du hier. Zur Bestätigung bekommst du
-        einen Code per Mail. Danach sind deine Rückmeldungen gesperrt.</div>
+  return `<div class="card" id="unterschrift"><h2 style="margin-top:0">Bestätigen</h2>
+      <div class="hint">Wenn alle Mängel beantwortet sind, bestätigst du hier mit einem Code, den du per Mail
+        bekommst. <b>Die bestätigte Mailadresse gilt als Unterschrift.</b> Danach sind deine Rückmeldungen gesperrt.</div>
       <div class="lbl" style="margin-top:10px">Vor- und Nachname</div>
       <input type="text" id="signname" class="feld" autocomplete="name" value="${esc(p.name || '')}">
       <div class="lbl" style="margin-top:10px">Firma</div>
@@ -324,8 +322,6 @@ function signKarteNeu() {
   const alt = $('#unterschrift');
   if (!alt) return;
   alt.outerHTML = unterschriftHtml();
-  const cv = $('#signfeld');
-  if (cv) Z.feld = unterschriftsFeld(cv);
   fortschritt();
 }
 
@@ -334,37 +330,6 @@ function signFehler(text) {
   if (!el) return alert(text);
   el.hidden = !text;
   el.textContent = text || '';
-}
-
-// Zeichenfeld: Finger oder Stift; benutzt man den Stift, zählt der Handballen nicht
-function unterschriftsFeld(cv) {
-  const skala = window.devicePixelRatio || 1;
-  const r = cv.getBoundingClientRect();
-  cv.width = r.width * skala; cv.height = r.height * skala;
-  const ctx = cv.getContext('2d');
-  ctx.scale(skala, skala);
-  ctx.lineWidth = 2.4; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.strokeStyle = '#111';
-  let leer = true, zeichnet = false, stift = false;
-  const pos = e => { const b = cv.getBoundingClientRect(); return [e.clientX - b.left, e.clientY - b.top]; };
-  cv.addEventListener('pointerdown', e => {
-    if (e.pointerType === 'pen') stift = true;
-    if (stift && e.pointerType !== 'pen') return;
-    zeichnet = true; leer = false;
-    try { cv.setPointerCapture(e.pointerId); } catch (x) { /* egal */ }
-    const [x, y] = pos(e); ctx.beginPath(); ctx.moveTo(x, y);
-    e.preventDefault();
-  });
-  cv.addEventListener('pointermove', e => {
-    if (!zeichnet || (stift && e.pointerType !== 'pen')) return;
-    const [x, y] = pos(e); ctx.lineTo(x, y); ctx.stroke();
-    e.preventDefault();
-  });
-  ['pointerup', 'pointercancel', 'pointerleave'].forEach(t => cv.addEventListener(t, () => { zeichnet = false; }));
-  return {
-    leer: () => leer,
-    leeren: () => { ctx.clearRect(0, 0, cv.width, cv.height); leer = true; },
-    bild: () => cv.toDataURL('image/png')
-  };
 }
 
 async function mitKnopf(knopf, text, arbeit) {
@@ -405,16 +370,12 @@ function signKlick(t) {
       codeAnfordern(knopf); return true;
     case 'btnAndereMail':
       Z.sign = null; signKarteNeu(); return true;      // Name/Mail stehen wieder vorausgefüllt da
-    case 'signleeren':
-      if (Z.feld) Z.feld.leeren(); return true;
     case 'btnUnterschreiben': {
       const code = ($('#signcode').value || '').trim();
       if (!/^\d{6}$/.test(code)) { signFehler('Bitte den 6-stelligen Code aus der Mail eingeben.'); return true; }
-      if (!Z.feld || Z.feld.leer()) { signFehler('Bitte im Feld unterschreiben.'); return true; }
-      mitKnopf(knopf, '⏳ wird unterschrieben …', async () => {
+      mitKnopf(knopf, '⏳ wird bestätigt …', async () => {
         // «mailcode»: der Code aus der Mail – «code» ist der Zugangscode des Links und darf nicht überschrieben werden
-        await rufen('unterschreiben', { name: Z.sign.name, firma: Z.sign.firma, mail: Z.sign.mail, mailcode: code,
-                                        bild: Z.feld.bild() });
+        await rufen('unterschreiben', { name: Z.sign.name, firma: Z.sign.firma, mail: Z.sign.mail, mailcode: code });
         Z.sign = null;
         await laden();
         window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -656,7 +617,25 @@ document.addEventListener('click', e => {
   }
 
   if (t.closest('#unterschrift')) signKlick(t);
+
+  const pdfKnopf = t.closest('#btnPdf');
+  if (pdfKnopf) pdfErzeugen(pdfKnopf);
 });
+
+async function pdfErzeugen(knopf) {
+  const alt = knopf.textContent;
+  knopf.disabled = true;
+  knopf.textContent = '⏳ PDF wird erstellt …';
+  try {
+    // Frisch laden: dann stimmen Foto-Links und der neueste Stand der Rückmeldungen
+    const d = await rufen('laden');
+    behebungsPdfSpeichern(await behebungsPdf(d));
+  } catch (e) {
+    alert('Das PDF konnte nicht erstellt werden: ' + e.message);
+  }
+  knopf.disabled = false;
+  knopf.textContent = alt;
+}
 
 document.addEventListener('keydown', e => {
   const foto = e.target.closest && e.target.closest('.foto[data-gal]');

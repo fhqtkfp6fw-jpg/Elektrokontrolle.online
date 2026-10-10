@@ -8,7 +8,7 @@
 <meta name="theme-color" content="#1b1e23">
 <title>Mängelbehebung</title>
 <link rel="apple-touch-icon" href="../icon-180.png">
-<link rel="stylesheet" href="behebung.css">
+<link rel="stylesheet" href="behebung.css?v=4">
 </head>
 <body>
 
@@ -36,7 +36,10 @@
   <button id="bv-weiter" class="bv-pfeil" aria-label="Nächstes Foto">›</button>
 </div>
 
+<!-- ?v=… bei jeder neuen Fassung hochzählen: sonst liefert der Browser bis zu 10 Min. die alte Datei -->
 <script src="../config.js"></script>
-<script src="behebung.js"></script>
+<script src="../jspdf.min.js"></script>
+<script src="../behebungspdf.js?v=2"></script>
+<script src="behebung.js?v=4"></script>
 </body>
 </html>
