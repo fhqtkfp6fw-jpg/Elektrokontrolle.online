@@ -2405,15 +2405,28 @@ function mppBloecke(W, doc, M, a, abgehakt, eig, f, bew, wirInstallateur, sichtL
   };
 
   // Prüfpunkte aus dem Reiter Sichtkontrolle, zweispaltig
-  const liste = titel => y => {
+  // mitSchutz: oben rechts «Schutz-System» und «Erder» – je eine Zeile mit dem gewählten
+  // Wert aus dem Reiter Anlagen (Muster MPP, Entscheid User 10.10.2026: keine Auswahlzeilen)
+  const liste = (titel, mitSchutz) => y => {
     W.titel(X1, y + 11, titel, 9);
     let yy = y + 11 + ZL;
     const punkte = sichtListe.filter(([s]) => s !== 'gruppe');
-    const haelfte = Math.ceil(punkte.length / 2);
+    const vorne = mitSchutz ? 2 : 0;                    // Zeilen, die rechts vorangestellt werden
+    const haelfte = Math.ceil((punkte.length + vorne) / 2);
+    if (mitSchutz) {
+      const erder = [a.erder, (a.sk_angaben || {}).erder_text].filter(Boolean).join(' – ');
+      [['Schutz-System:', a.schutzsystem || ''], ['Erder:', erder]].forEach(([lbl, wert], i) => {
+        const zeileY = yy + i * ZL;
+        W.kasten(X2, zeileY - 5.6, !!wert);
+        W.txt(X2 + 10, zeileY, lbl, 6.6);
+        const wx = X2 + 10 + W.breite(lbl, 6.6) + 3;
+        if (wert) W.txt(wx, zeileY, W.umbruch(wert, R - 6 - wx, 6.6, true)[0], 6.6, true);
+      });
+    }
     punkte.forEach(([schluessel, text], i) => {
       const links = i < haelfte;
       const x = links ? X1 : X2;
-      const zeileY = yy + (links ? i : i - haelfte) * ZL;
+      const zeileY = yy + (links ? i : i - haelfte + vorne) * ZL;
       W.kasten(x, zeileY - 5.6, abgehakt[schluessel] === 'ok');
       W.umbruch(text, (links ? MID - 14 : R - 6) - x - 12, 6.6).slice(0, 1)
         .forEach(z => W.txt(x + 10, zeileY, z, 6.6));
@@ -2643,7 +2656,7 @@ function mppPdf(a, gruppen, abgehakt) {
 
   const B = mppBloecke(W, doc, M, a, abgehakt, eig, f, bew, wirInstallateur, SICHT_STANDARD);
   const bloecke = [B.parteien, B.ort, B.anlage, B.pruefgrund,
-                   B.liste('Sichtprüfung, Funktionsprüfung und Dokumentation'),
+                   B.liste('Sichtprüfung, Funktionsprüfung und Dokumentation', true),
                    B.geraete, B.ergebnis, B.unterschriften];
 
   let seiten = 1;
@@ -5673,11 +5686,18 @@ function anlagenChips(beimWechsel) {
         S.anlageId = c.dataset.aid; S.gruppen = null; beimWechsel();
       }));
       $('#chipAdd').addEventListener('click', async () => {
-        const neueAnlage = await zeileAnlegen('anlagen', {
+        // Gibt es schon Anlagen, wird gefragt, ob deren Einstellungen übernommen werden sollen
+        let vorlage = null;
+        if ((S.anlagen || []).length) {
+          vorlage = await vorlageAnlageDialog();
+          if (vorlage === undefined) return;                 // abgebrochen: keine neue Anlage
+        }
+        const neueAnlage = await zeileAnlegen('anlagen', Object.assign({
           kontrolle_id: S.kontrolle.id,
           reihenfolge: naechsteNr(S.anlagen),
           name: 'Anlage ' + ((S.anlagen || []).length + 1)
-        });
+        }, vorlage ? anlageEinstellungen(vorlage) : {}));
+        if (vorlage) await sichtUebernehmen(vorlage.id, neueAnlage.id);
         // Jede Anlage beginnt mit der Zuleitung als erster Messzeile
         await zeileAnlegen('gruppen', {
           anlage_id: neueAnlage.id, kontrolle_id: S.kontrolle.id, reihenfolge: 0, bez: 'Zuleitung'
@@ -5688,6 +5708,61 @@ function anlagenChips(beimWechsel) {
       });
     }
   };
+}
+
+/* ---- Neue Anlage: Einstellungen einer bestehenden übernehmen (Wunsch User 10.10.2026) ----
+   Übernommen werden Nutzung / Jahre (beide Zeilen), Schutzsystem, Erder (mit Ergänzung),
+   Schaltgerätekombination und die ganze Sichtprüfung – sonst nichts (kein Name, keine
+   Zählernummer, kein Eigentümer, keine Messwerte). */
+function anlageEinstellungen(q) {
+  const sk = q.sk_angaben || {};
+  const neuSk = {};
+  if (sk.nutzung2) neuSk.nutzung2 = sk.nutzung2;
+  if (sk.erder_text) neuSk.erder_text = sk.erder_text;
+  return {
+    periode2_txt: q.periode2_txt || '', periode: q.periode || '', periode2: q.periode2 || '',
+    schutzsystem: q.schutzsystem || '', erder: q.erder || '', asbest: q.asbest || '',
+    sk_angaben: neuSk
+  };
+}
+
+async function sichtUebernehmen(vonId, nachId) {
+  const quelle = await zeilenHolen('sichtkontrolle', 'anlage_id', vonId);
+  const zeilen = (quelle || []).filter(z => z.wert)
+    .map(z => ({ anlage_id: nachId, kontrolle_id: S.kontrolle.id, punkt: z.punkt, wert: z.wert }));
+  if (!zeilen.length) return;
+  await auftragEinreihen({ art: 'upsert', tabelle: 'sichtkontrolle', werte: zeilen, konflikt: 'anlage_id,punkt' });
+  paketNachfuehren();
+}
+
+// Gibt die gewählte Anlage zurück, null = leer beginnen, undefined = abgebrochen
+function vorlageAnlageDialog() {
+  return new Promise(fertig => {
+    const kurz = a => [[a.periode2_txt, a.periode ? a.periode + ' J.' : ''].filter(Boolean).join(' '),
+      a.schutzsystem, a.erder, a.asbest].filter(Boolean).join(' · ') || 'noch keine Einstellungen';
+    const ov = document.createElement('div');
+    ov.className = 'overlay';
+    ov.innerHTML = `<div class="dialog">
+      <h3>Neue Anlage</h3>
+      <div class="dlgtext">Einstellungen einer bestehenden Anlage übernehmen?<br>
+        <span class="hint">Nutzung / Jahre, Schutzsystem, Erder, Schaltgerätekombination und die ganze
+        Sichtprüfung. Name, Zählernummer, Eigentümer und Messwerte werden nicht übernommen.</span></div>
+      ${(S.anlagen || []).map(a => `<button class="btn wide vorlage" data-aid="${a.id}"
+          style="margin-top:8px;flex-direction:column;align-items:flex-start;text-align:left">
+          <b>⟳ Von «${esc(a.name || 'Anlage ohne Name')}»</b>
+          <span class="hint" style="margin:2px 0 0">${esc(kurz(a))}</span></button>`).join('')}
+      <div class="btnrow" style="margin-top:14px">
+        <button class="btn" id="vl_leer">Leer beginnen</button>
+        <button class="btn" id="vl_abbr">Abbrechen</button>
+      </div></div>`;
+    document.body.appendChild(ov);
+    const zu = wert => { ov.remove(); fertig(wert); };
+    ov.querySelectorAll('.vorlage').forEach(b => b.addEventListener('click',
+      () => zu((S.anlagen || []).find(a => a.id === b.dataset.aid) || null)));
+    ov.querySelector('#vl_leer').addEventListener('click', () => zu(null));
+    ov.querySelector('#vl_abbr').addEventListener('click', () => zu(undefined));
+    ov.addEventListener('click', e => { if (e.target === ov) zu(undefined); });
+  });
 }
 
 async function renderAnlagen() {
@@ -5733,6 +5808,14 @@ async function renderAnlagen() {
     return;
   }
 
+  // Kontrollperiode in Jahren – Auswahl; ein älterer, freier Wert bleibt wählbar
+  const jahreWahl = (id, wert) => {
+    const werte = ['1', '3', '5', '10', '20'];
+    const alt = wert && !werte.includes(String(wert)) ? String(wert) : '';
+    return `<select id="${id}" title="Jahre"><option value="">Jahre</option>
+      ${(alt ? [alt] : []).concat(werte).map(w => `<option value="${esc(w)}" ${String(wert) === w ? 'selected' : ''}>${esc(w)}</option>`).join('')}
+    </select>`;
+  };
   const wahl = (id, feld, werte, titel) => `
     <div><label class="f">${titel}</label>
       <select id="${id}"><option value="">–</option>
@@ -5851,15 +5934,18 @@ async function renderAnlagen() {
     <label class="f">Nutzung und Kontrollperiode(n) – zweite Zeile z.B. für Sch III</label>
     <div class="row">
       <div><input type="text" id="a_nutz1" value="${esc(a.periode2_txt ? a.periode2_txt : '')}" placeholder="Nutzung, z.B. Wohnung"></div>
-      <div class="narrow" style="flex:0 0 110px"><input type="text" id="a_per1" value="${esc(a.periode)}" placeholder="Jahre"></div>
+      <div class="narrow" style="flex:0 0 110px">${jahreWahl('a_per1', a.periode)}</div>
       <div><input type="text" id="a_nutz2" value="${esc(a.sk_angaben && a.sk_angaben.nutzung2 || '')}" placeholder="2. Nutzung (optional)"></div>
-      <div class="narrow" style="flex:0 0 110px"><input type="text" id="a_per2" value="${esc(a.periode2)}" placeholder="Jahre"></div>
+      <div class="narrow" style="flex:0 0 110px">${jahreWahl('a_per2', a.periode2)}</div>
     </div>
     <div class="row">
       ${wahl('a_schutz', 'schutzsystem', ['TN-S', 'TN-C', 'TN-C-S', 'Sch III'], 'Schutzsystem')}
-      ${wahl('a_erder', 'erder', ['Fundament', 'Tiefenerder', 'Banderder'], 'Erder')}
+      ${wahl('a_erder', 'erder', ['Fundament', 'Tiefenerder', 'Banderder', 'Wasserleitung'], 'Erder')}
       ${wahl('a_asbest', 'asbest', ['Asbestfrei', 'Asbestverdacht'], 'Schaltgerätekombination')}
     </div>
+    <label class="f">Erder – Ergänzung</label>
+    <input type="text" id="a_erder_txt" value="${esc((a.sk_angaben || {}).erder_text || '')}"
+      placeholder="z.B. Erdungsband im Keller, Anschluss an Wasserleitung vor Zähler">
     <label class="f" style="margin-top:14px">Art der Anlage</label>
     <div class="chips" id="a_art">
       <label class="chip"><input type="radio" name="anlagenart" value="stark"
@@ -5966,6 +6052,7 @@ async function renderAnlagen() {
   bindeFeld($('#a_nutz1'), a, 'periode2_txt', 'anlagen');
   bindeFeld($('#a_schutz'), a, 'schutzsystem', 'anlagen');
   bindeFeld($('#a_erder'), a, 'erder', 'anlagen');
+  bindeJsonFeld($('#a_erder_txt'), a, 'sk_angaben', 'erder_text', 'anlagen');
   bindeFeld($('#a_asbest'), a, 'asbest', 'anlagen');
   $('#a_eig').addEventListener('click', () => eigentuemerDialog(a));
   $$('.af_w').forEach(b => b.addEventListener('click', async () => {
@@ -7237,7 +7324,7 @@ async function optGrund() {
       <button class="btn primary" id="g_save">Speichern</button>
       <button class="btn danger small" id="g_reset">Auf Standard zurücksetzen</button>
     </div>
-    <div class="hint" style="margin-top:12px">App-Version: <b>Online 3.21</b></div>
+    <div class="hint" style="margin-top:12px">App-Version: <b>Online 3.25</b></div>
   </div>`;
 
   // Ändern darf nur der Admin (die Datenbank lässt es ohnehin nur ihm zu)
