@@ -1,6 +1,6 @@
 'use strict';
 
-const CACHE = 'nivonline-v50';
+const CACHE = 'nivonline-v52';
 const ASSETS = ['./', './index.html', './app.css', './app.js', './config.js',
                 './supabase.js', './jspdf.min.js', './qrcode.min.js', './manifest.webmanifest',
                 './icon-180.png', './icon-512.png'];

@@ -1260,6 +1260,75 @@ function qrSvg(text, zelle) {
   return qr.createSvgTag(zelle || 4, 2);
 }
 
+/* Fürs PDF: der gültige Link dieser Kontrolle – nur wenn der Bericht unterschrieben ist.
+   Fehlt er noch, legt ihn die Erstellerfirma hier an (geschieht sonst beim Öffnen des Abschlusses). */
+async function behebungFuerBericht() {
+  if (!berichtGesperrt() || !S.kontrolle) return null;
+  let b = S.behebung && S.behebung.kontrolle_id === S.kontrolle.id ? S.behebung : null;
+  if (navigator.onLine) {
+    const { data, error } = await sb.from('behebungen').select('*').eq('kontrolle_id', S.kontrolle.id).maybeSingle();
+    if (error) throw error;
+    b = data;
+    if (!b && istErstellerfirma()) {
+      const r = await sb.rpc('behebung_anlegen', { k_id: S.kontrolle.id });
+      if (r.error) throw r.error;
+      b = r.data;
+    }
+    S.behebung = b || null;
+  }
+  if (!b || !b.code || b.widerrufen_am || new Date(b.gueltig_bis).getTime() < Date.now()) return null;
+  return b;
+}
+
+/* QR-Code als Vektor zeichnen – gestochen scharf in jeder Grösse, ohne Bilddatei */
+function qrInsPdf(doc, text, x, y, groesse) {
+  if (typeof qrcode !== 'function') return false;
+  const qr = qrcode(0, 'M');
+  qr.addData(text);
+  qr.make();
+  const n = qr.getModuleCount(), z = groesse / n;
+  doc.setFillColor(0, 0, 0);
+  for (let r = 0; r < n; r++) {
+    for (let c = 0; c < n; c++) {
+      if (!qr.isDark(r, c)) continue;
+      let e = c;
+      while (e + 1 < n && qr.isDark(r, e + 1)) e++;      // dunkle Strecke am Stück
+      doc.rect(x + c * z, y + r * z, (e - c + 1) * z, z, 'F');
+      c = e;
+    }
+  }
+  return true;
+}
+
+// Kasten im Kontrollbericht: QR-Code links, Erklärung und anklickbarer Link rechts
+function behebungsBlock(doc, link, gueltigBis, x, y, breite, hoehe) {
+  doc.setLineWidth(0.25); doc.setDrawColor(0);
+  doc.rect(x, y, breite, hoehe);
+  const qrG = hoehe - 4;
+  const hatQr = qrInsPdf(doc, link, x + 2, y + 2, qrG);
+  const tx = x + (hatQr ? qrG + 6 : 4), tb = breite - (tx - x) - 3;
+  doc.setTextColor(0); doc.setFont('helvetica', 'bold'); doc.setFontSize(10.5);
+  doc.text('Mängelbehebung online melden', tx, y + 6);
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5);
+  const erkl = doc.splitTextToSize('Für den Installateur: QR-Code mit dem Handy scannen oder den Link öffnen. '
+    + 'Pro Mangel Rückmeldung und Fotos erfassen und mit Bestätigung per Mail unterschreiben – ohne Anmeldung.', tb);
+  doc.text(erkl, tx, y + 11);
+  // Link auf EINER Zeile (zum Anklicken und Abtippen) – Schrift notfalls etwas kleiner
+  let fs = 8.5;
+  doc.setFontSize(fs);
+  while (doc.getTextWidth(link) > tb && fs > 6) { fs -= 0.25; doc.setFontSize(fs); }
+  const ly = y + 11 + erkl.length * 3.6 + 2.5;
+  doc.setTextColor(10, 102, 194);
+  doc.text(link, tx, ly);
+  const lw = Math.min(doc.getTextWidth(link), tb);
+  doc.setDrawColor(10, 102, 194); doc.setLineWidth(0.2);
+  doc.line(tx, ly + 0.8, tx + lw, ly + 0.8);
+  doc.link(tx, ly - 3.5, lw, 5, { url: link });
+  doc.setDrawColor(0); doc.setTextColor(110); doc.setFontSize(7.5);
+  doc.text('Gültig bis ' + dat(new Date(gueltigBis)), tx, ly + 5);
+  doc.setTextColor(0);
+}
+
 async function behebungKarteZeichnen() {
   const box = $('#behebungkarte');
   if (!box) return;
@@ -1290,7 +1359,7 @@ async function behebungKarteZeichnen() {
     }
     const [{ data: rm }, { data: prot }] = await Promise.all([
       sb.from('rueckmeldungen').select('mangel_id, status').eq('kontrolle_id', k.id),
-      sb.from('behebung_protokoll').select('zeit, aktion').eq('behebung_id', b.id)
+      sb.from('behebung_protokoll').select('zeit, aktion, info').eq('behebung_id', b.id)
         .order('zeit', { ascending: false }).limit(10)
     ]);
     if (!S.maengel) await maengelLaden();
@@ -1302,12 +1371,14 @@ async function behebungKarteZeichnen() {
     const aktionText = {
       laden: 'geöffnet', rueckmeldung: 'Rückmeldung gespeichert', foto_hochladen: 'Foto hinzugefügt',
       foto_entfernen: 'Foto entfernt', neuer_code: 'neuer Link erstellt', unterschreiben: 'unterschrieben',
-      unterschrift_loeschen: 'Unterschrift gelöscht', code_senden: 'Mail-Code angefordert'
+      unterschrift_loeschen: 'Unterschrift gelöscht', code_senden: 'Mail-Code angefordert',
+      mail_fehler: '⚠️ Mail-Code NICHT verschickt'
     };
 
     box.innerHTML = titel + `
       ${b.unterschrieben_am
-        ? `<div class="hint" style="color:var(--ok)">✅ <b>Behebung unterschrieben</b> von ${esc(b.bearbeiter_name)}
+        ? `<div class="hint" style="color:var(--ok)">✅ <b>Behebung unterschrieben</b> von ${esc(b.bearbeiter_name)}${
+            b.bearbeiter_firma ? ', ' + esc(b.bearbeiter_firma) : ''}
             (${esc(b.bearbeiter_mail)}, per Mail bestätigt) am ${esc(fmtDate(b.unterschrieben_am))}.</div>`
         : `<div class="hint">${maengel.length
             ? `Rückmeldungen: <b>${beantwortet} von ${maengel.length}</b> Mängeln beantwortet.`
@@ -1330,7 +1401,8 @@ async function behebungKarteZeichnen() {
         </div>` : ''}
       ${(prot || []).length ? `<details style="margin-top:6px"><summary class="hint" style="cursor:pointer">
           Zugriffe (letzte ${prot.length})</summary><div class="hint">${prot.map(p =>
-            esc(fmtDate(p.zeit)) + ' – ' + esc(aktionText[p.aktion] || p.aktion)).join('<br>')}</div></details>` : ''}`;
+            esc(fmtDate(p.zeit)) + ' – ' + esc(aktionText[p.aktion] || p.aktion)
+            + (p.aktion === 'mail_fehler' && p.info ? ': ' + esc(p.info) : '')).join('<br>')}</div></details>` : ''}`;
 
     const an = (id, fn) => { const el = $('#' + id); if (el) el.addEventListener('click', fn); };
     an('beh_kopie', async () => {
@@ -1776,16 +1848,25 @@ async function berichtPdf(wahl) {
 
   /* ---- Erledigungstext und Bestätigung (nur wenn Mängel) ---- */
   if (maengel.length) {
+    // Link + QR-Code für die Mängelbehebung – direkt über dem Bestätigungsfeld
+    let beh = null;
+    try { beh = await behebungFuerBericht(); } catch (e) { protokollieren('Behebungs-Link fürs PDF', k.id, e); }
+    const LINK_H = beh ? 32 : 0;
     doc.setFontSize(9.5);
     const erl = wrap(G.erledigungsText || '', CW - 8);
     const kopfTxt = wrap('Die Unterzeichnenden bestätigen, dass die Mängel gemäss Kontrollbericht nach NIV Art. 3 + 4 behoben wurden.', CW - 6);
     const kh = kopfTxt.length * 4.2 + 4;
-    platz(erl.length * 4.2 + 8 + kh + 26 + 8);
+    platz(erl.length * 4.2 + 8 + LINK_H + kh + 26 + 8);
     y += 3;
     doc.setLineWidth(0.25);
     doc.rect(M, y, CW, erl.length * 4.2 + 5);
     doc.text(erl, M + 4, y + 4.5);
     y += erl.length * 4.2 + 9;
+    if (beh) {
+      behebungsBlock(doc, behebungLink(beh), beh.gueltig_bis, M, y, CW, LINK_H - 4);
+      y += LINK_H;
+      doc.setFontSize(9.5); doc.setFont('helvetica', 'normal'); doc.setTextColor(0);
+    }
     doc.setFillColor(235, 235, 235);
     doc.rect(M, y, CW, kh, 'FD');
     doc.setFont('helvetica', 'bold');
@@ -7112,7 +7193,7 @@ async function optGrund() {
       <button class="btn primary" id="g_save">Speichern</button>
       <button class="btn danger small" id="g_reset">Auf Standard zurücksetzen</button>
     </div>
-    <div class="hint" style="margin-top:12px">App-Version: <b>Online 3.18</b></div>
+    <div class="hint" style="margin-top:12px">App-Version: <b>Online 3.20</b></div>
   </div>`;
 
   // Ändern darf nur der Admin (die Datenbank lässt es ohnehin nur ihm zu)

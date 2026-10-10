@@ -42,7 +42,7 @@ async function rufen(aktion, mehr) {
     r = await fetch(FN_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY },
-      body: JSON.stringify(Object.assign({ aktion, code: Z.code }, mehr || {}))
+      body: JSON.stringify(Object.assign({}, mehr || {}, { aktion, code: Z.code }))
     });
   } catch (e) {
     const f = new Error('Keine Verbindung zum Server.');
@@ -167,7 +167,8 @@ function zeichnen() {
   const u = d.unterschrift;
   $('#inhalt').innerHTML = `
     ${kopfKarte(k)}
-    ${u ? `<div class="banner ok">✅ <b>Unterschrieben</b> von ${esc(u.name)} (${esc(u.mail)}, per Mail bestätigt)
+    ${u ? `<div class="banner ok">✅ <b>Unterschrieben</b> von ${esc(u.name)}${u.firma ? ', ' + esc(u.firma) : ''}
+          (${esc(u.mail)}, per Mail bestätigt)
           am ${esc(datum(u.am))} um ${esc(zeit(u.am))}. Rückmeldungen und Fotos sind gesperrt.</div>`
       : `<div class="banner info">Beantworte jeden Mangel mit <b>✓ behoben</b> oder <b>✗ nicht behoben</b>,
           schreib dazu, was gemacht wurde, und füge Fotos hinzu. <b>Alles wird sofort gespeichert</b> –
@@ -251,14 +252,14 @@ function fotosHtml(liste, gal, eigene) {
    Schritt 1: Name + Mail → Code per Mail.  Schritt 2: Code + Unterschrift.
    Löschen: Code an DIESELBE Adresse wie bei der Unterschrift. */
 
-Z.sign = null;          // { schritt: 1|2, name, mail, maskiert }
+Z.sign = null;          // { schritt: 1|2, name, firma, mail, maskiert }
 Z.loeschen = null;      // { maskiert } – Code zum Löschen ist unterwegs
 
 function personLaden() {
   try { return JSON.parse(localStorage.getItem('behebung-person') || '{}'); } catch (e) { return {}; }
 }
-function personMerken(name, mail) {
-  try { localStorage.setItem('behebung-person', JSON.stringify({ name, mail })); } catch (e) { /* egal */ }
+function personMerken(name, firma, mail) {
+  try { localStorage.setItem('behebung-person', JSON.stringify({ name, firma, mail })); } catch (e) { /* egal */ }
 }
 
 function unterschriftHtml() {
@@ -267,7 +268,8 @@ function unterschriftHtml() {
     const u = d.unterschrift;
     return `<div class="card" id="unterschrift"><h2 style="margin-top:0">Unterschrift</h2>
         ${u.bild ? `<img src="${esc(u.bild)}" alt="Unterschrift" style="max-width:260px;max-height:110px;display:block">` : ''}
-        <div><b>${esc(u.name)}</b> · ${esc(u.mail)} <span class="hint">(per Mail bestätigt)</span></div>
+        <div><b>${esc(u.name)}</b>${u.firma ? ', ' + esc(u.firma) : ''}</div>
+        <div>${esc(u.mail)} <span class="hint">(per Mail bestätigt)</span></div>
         <div class="hint">${esc(datum(u.am))}, ${esc(zeit(u.am))}</div>
         ${Z.loeschen ? `
           <div class="banner info" style="margin-top:12px">Ein Code zum Löschen ging an <b>${esc(Z.loeschen.maskiert)}</b>
@@ -293,7 +295,8 @@ function unterschriftHtml() {
         <div class="lbl" style="margin-top:12px">Unterschrift – mit dem Finger ins Feld</div>
         <canvas id="signfeld" class="signfeld"></canvas>
         <button class="btn" id="signleeren" style="min-height:40px;margin-top:6px">Nochmals</button>
-        <div class="hint" style="margin-top:10px">Mit der Unterschrift bestätige ich, <b>${esc(p.name)}</b>, die
+        <div class="hint" style="margin-top:10px">Mit der Unterschrift bestätige ich, <b>${esc(p.name)}</b>
+          (${esc(p.firma)}), die
           Rückmeldungen zu allen Positionen dieses Kontrollberichts. Danach sind sie gesperrt.</div>
         <button class="btn primary voll" id="btnUnterschreiben">✍️ Verbindlich unterschreiben</button>
         <div class="zeile" style="margin-top:4px">
@@ -307,6 +310,8 @@ function unterschriftHtml() {
         einen Code per Mail. Danach sind deine Rückmeldungen gesperrt.</div>
       <div class="lbl" style="margin-top:10px">Vor- und Nachname</div>
       <input type="text" id="signname" class="feld" autocomplete="name" value="${esc(p.name || '')}">
+      <div class="lbl" style="margin-top:10px">Firma</div>
+      <input type="text" id="signfirma" class="feld" autocomplete="organization" value="${esc(p.firma || '')}">
       <div class="lbl" style="margin-top:10px">Mailadresse</div>
       <input type="email" id="signmail" class="feld" autocomplete="email" inputmode="email" autocapitalize="none"
         value="${esc(p.mail || '')}">
@@ -377,13 +382,15 @@ async function mitKnopf(knopf, text, arbeit) {
 
 async function codeAnfordern(knopf) {
   const name = Z.sign ? Z.sign.name : ($('#signname').value || '').trim();
+  const firma = Z.sign ? Z.sign.firma : ($('#signfirma').value || '').trim();
   const mail = Z.sign ? Z.sign.mail : ($('#signmail').value || '').trim().toLowerCase();
   if (!name) return signFehler('Bitte Vor- und Nachname eingeben.');
+  if (!firma) return signFehler('Bitte die Firma eingeben.');
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(mail)) return signFehler('Bitte eine gültige Mailadresse eingeben.');
   await mitKnopf(knopf, '⏳ wird gesendet …', async () => {
     const r = await rufen('code_senden', { zweck: 'unterschreiben', mail });
-    personMerken(name, mail);
-    Z.sign = { schritt: 2, name, mail, maskiert: r.mail };
+    personMerken(name, firma, mail);
+    Z.sign = { schritt: 2, name, firma, mail, maskiert: r.mail };
     signKarteNeu();
     const f = $('#signcode'); if (f) f.focus();
   });
@@ -405,7 +412,9 @@ function signKlick(t) {
       if (!/^\d{6}$/.test(code)) { signFehler('Bitte den 6-stelligen Code aus der Mail eingeben.'); return true; }
       if (!Z.feld || Z.feld.leer()) { signFehler('Bitte im Feld unterschreiben.'); return true; }
       mitKnopf(knopf, '⏳ wird unterschrieben …', async () => {
-        await rufen('unterschreiben', { name: Z.sign.name, mail: Z.sign.mail, code, bild: Z.feld.bild() });
+        // «mailcode»: der Code aus der Mail – «code» ist der Zugangscode des Links und darf nicht überschrieben werden
+        await rufen('unterschreiben', { name: Z.sign.name, firma: Z.sign.firma, mail: Z.sign.mail, mailcode: code,
+                                        bild: Z.feld.bild() });
         Z.sign = null;
         await laden();
         window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -427,7 +436,7 @@ function signKlick(t) {
       const code = ($('#loeschcode').value || '').trim();
       if (!/^\d{6}$/.test(code)) { signFehler('Bitte den 6-stelligen Code aus der Mail eingeben.'); return true; }
       mitKnopf(knopf, '⏳ wird gelöscht …', async () => {
-        await rufen('unterschrift_loeschen', { code });
+        await rufen('unterschrift_loeschen', { mailcode: code });
         Z.loeschen = null;
         await laden();
       });
